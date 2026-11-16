@@ -1,0 +1,39 @@
+{% extends "control/base.html" %}
+{% block title %}Photo archive{% endblock %}
+{% block content %}
+<h1>Photo archive</h1>
+<p class="muted">{{ total }} picture{{ total|pluralize }} stored on this computer. Showing {{ page.paginator.count }}.</p>
+<form class="filters" method="get">
+  <label>Date <input type="date" name="date" value="{{ date }}"></label>
+  <label>Trip
+    <select name="trip">
+      <option value="">All trips</option>
+      {% for t in trips %}<option value="{{ t.id }}" {% if trip == t.id|stringformat:"d" %}selected{% endif %}>Trip {{ t.id }} · {{ t.started_at|date:"M j, H:i" }}</option>{% endfor %}
+    </select>
+  </label>
+  <label><span>&nbsp;</span><span><input type="checkbox" name="scans" value="1" {% if scans %}checked{% endif %}> 360° scans only</span></label>
+  <button class="btn" type="submit">Filter</button>
+  {% if date or trip or scans %}<a href="{% url 'control:archive' %}">Clear</a>{% endif %}
+</form>
+
+{% if page.object_list %}
+<div class="gallery">
+  {% for p in page.object_list %}
+  <a class="tile" href="{{ p.get_absolute_url }}">
+    <img src="{% if p.thumbnail %}{{ p.thumbnail.url }}{% else %}{{ p.image.url }}{% endif %}" alt="Photo {{ p.id }}" loading="lazy">
+    <div>
+      <strong>#{{ p.id }}</strong> · {{ p.taken_at|date:"M j, Y H:i:s" }}
+      <div class="muted">{% if p.trip_id %}Trip {{ p.trip_id }}{% endif %}{% if p.scan_index is not None %} · scan {{ p.scan_index|add:1 }}{% endif %}{% if p.note %} · {{ p.note|truncatechars:40 }}{% endif %}</div>
+    </div>
+  </a>
+  {% endfor %}
+</div>
+<div class="pager">
+  {% if page.has_previous %}<a href="?{% if query %}{{ query }}&{% endif %}page={{ page.previous_page_number }}">← Newer</a>{% endif %}
+  <span class="muted">Page {{ page.number }} of {{ page.paginator.num_pages }}</span>
+  {% if page.has_next %}<a href="?{% if query %}{{ query }}&{% endif %}page={{ page.next_page_number }}">Older →</a>{% endif %}
+</div>
+{% else %}
+<p>No pictures{% if date or trip or scans %} match these filters{% else %} yet. Take one from the <a href="{% url 'control:control' %}">control page</a>{% endif %}.</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,94 @@
+{% extends "control/base.html" %}
+{% load versioned_static %}
+{% block title %}Control{% endblock %}
+{% block content %}
+{% csrf_token %}
+<div class="grid">
+  <section class="card status-card">
+    <div class="card-head">
+      <h2>Robot</h2>
+      <span id="conn" class="pill">connecting…</span>
+    </div>
+    {% if backend == "sim" %}<p class="notice">Simulator mode: no real robot is moving. Set <code>ROBOT_BACKEND=agent</code> to drive the TurtleBot.</p>{% endif %}
+    <dl class="stats">
+      <div><dt>Battery</dt><dd id="battery">–</dd></div>
+      <div><dt>Dock</dt><dd id="dock">–</dd></div>
+      <div><dt>Position</dt><dd id="pose">–</dd></div>
+      <div><dt>Heading</dt><dd id="heading">–</dd></div>
+    </dl>
+    <div id="job" class="job idle">Idle</div>
+    <button id="stop" class="btn stop" type="button">STOP</button>
+  </section>
+
+  <section class="card controls-card">
+    <h2>Move</h2>
+    <div class="row">
+      <label>Distance
+        <select id="distance">{% for d in forward_choices %}<option value="{{ d }}" {% if d == 0.5 %}selected{% endif %}>{{ d }} m</option>{% endfor %}</select>
+      </label>
+      <label>Angle
+        <select id="angle">{% for a in turn_choices %}<option value="{{ a }}" {% if a == 90 %}selected{% endif %}>{{ a }}°</option>{% endfor %}</select>
+      </label>
+      <label class="check"><input type="checkbox" id="check-clear" checked> Obstacle check (lidar)</label>
+    </div>
+    <div class="pad">
+      <span></span>
+      <button class="btn cmd" data-cmd="forward" type="button">▲ Forward</button>
+      <span></span>
+      <button class="btn cmd" data-cmd="left" type="button">⟲ Turn left</button>
+      <button class="btn cmd" data-cmd="photo" type="button">● Take picture</button>
+      <button class="btn cmd" data-cmd="right" type="button">⟳ Turn right</button>
+    </div>
+    <div class="row buttons">
+      <button class="btn cmd secondary" data-cmd="scan" type="button">Scan 360° (8 pictures)</button>
+      <button class="btn cmd secondary" data-cmd="undock" type="button">Undock</button>
+      <button class="btn cmd secondary" data-cmd="dock" type="button">Dock</button>
+      <button class="btn cmd home" data-cmd="return_home" type="button" id="return-btn">⌂ Return to start / dock</button>
+    </div>
+    <p class="hint" id="trip-info">No trip yet: the first move starts recording the path home.</p>
+
+    <h2>Type a command</h2>
+    <form id="text-form" class="text-form">
+      <input id="text" type="text" maxlength="500" autocomplete="off"
+             placeholder="e.g. forward 50 cm, turn left 90, take a picture">
+      <button class="btn secondary" type="button" id="preview-btn">Check</button>
+      <button class="btn" type="submit">Run</button>
+    </form>
+    <p class="hint" id="text-result">Understands: forward / turn left|right / turn around / take a picture / scan / undock / dock / return home.</p>
+  </section>
+
+  <section class="card photo-card">
+    <div class="card-head">
+      <h2>Latest picture</h2>
+      <a href="{% url 'control:archive' %}">Archive →</a>
+    </div>
+    <a id="latest-link" href="#" class="latest"><img id="latest-img" alt="" hidden><span id="latest-empty">No pictures yet.</span></a>
+    <p class="hint" id="latest-meta"></p>
+  </section>
+
+  <section class="card map-card">
+    <h2>Path this trip</h2>
+    <svg id="map" viewBox="-1 -1 2 2" preserveAspectRatio="xMidYMid meet" aria-label="Path of the current trip"></svg>
+    <p class="hint">Grey: path recorded since the start (the way home). Blue: robot. Square: start or dock.</p>
+  </section>
+
+  <section class="card log-card">
+    <h2>Recent commands</h2>
+    <table class="log"><thead><tr><th>Time</th><th>Command</th><th>Result</th></tr></thead><tbody id="log"></tbody></table>
+  </section>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+  window.TB = {
+    urls: {
+      state: "{% url 'control:api_state' %}",
+      submit: "{% url 'control:api_submit' %}",
+      stop: "{% url 'control:api_stop' %}",
+      interpret: "{% url 'control:api_interpret' %}",
+    },
+    timeZone: "{{ time_zone }}",  // show times in the lab's zone (settings.TIME_ZONE), whatever the PC clock says
+  };
+</script>
+<script src="{% vstatic 'control/app.js' %}"></script>
+{% endblock %}

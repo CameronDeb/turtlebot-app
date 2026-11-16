@@ -1,0 +1,16 @@
+# Optional: start the agent automatically at boot (user service, no root needed).
+#   mkdir -p ~/.config/systemd/user && cp turtlebot-agent.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now turtlebot-agent
+#   sudo loginctl enable-linger ubuntu      # so it runs without anyone logged in
+# Logs: journalctl --user -u turtlebot-agent -f
+[Unit]
+Description=TurtleBot web app agent
+After=network-online.target
+
+[Service]
+ExecStart=%h/turtlebot-app/robot_agent/run_agent.sh
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

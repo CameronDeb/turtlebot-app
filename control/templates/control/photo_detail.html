@@ -1,0 +1,30 @@
+{% extends "control/base.html" %}
+{% block title %}Photo #{{ photo.id }}{% endblock %}
+{% block content %}
+<p><a href="{% url 'control:archive' %}">← Archive</a>
+  {% if newer %} · <a href="{{ newer.get_absolute_url }}">Newer</a>{% endif %}
+  {% if older %} · <a href="{{ older.get_absolute_url }}">Older</a>{% endif %}</p>
+<h1>Photo #{{ photo.id }}</h1>
+<div class="detail">
+  <div><a href="{{ photo.image.url }}"><img src="{{ photo.image.url }}" alt="Photo {{ photo.id }}"></a></div>
+  <aside class="card">
+    <dl class="meta">
+      <dt>Taken</dt><dd>{{ photo.taken_at|date:"l, M j, Y H:i:s" }}</dd>
+      <dt>Size</dt><dd>{{ photo.width }} × {{ photo.height }}</dd>
+      <dt>Camera</dt><dd><code>{{ photo.camera_topic|default:"–" }}</code></dd>
+      <dt>Robot position (odom)</dt><dd>{% if photo.x is not None %}{{ photo.x|floatformat:2 }}, {{ photo.y|floatformat:2 }} m, heading {{ heading_deg }}°{% else %}unknown{% endif %}</dd>
+      {% if photo.trip_id %}<dt>Trip</dt><dd><a href="{% url 'control:archive' %}?trip={{ photo.trip_id }}">Trip {{ photo.trip_id }}</a>{% if photo.scan_index is not None %}, scan picture {{ photo.scan_index|add:1 }}{% endif %}</dd>{% endif %}
+      {% if photo.job %}<dt>Command</dt><dd>{{ photo.job.kind }}{% if photo.job.text %} (“{{ photo.job.text }}”){% endif %}</dd>{% endif %}
+      <dt>Files</dt>
+      <dd><a href="{{ photo.image.url }}" download>Image (PNG)</a>{% if photo.depth %} · <a href="{{ photo.depth.url }}" download>Depth (16-bit PNG, mm)</a>{% endif %}</dd>
+      {% if photo.detections %}<dt>Detections</dt><dd>{% for d in photo.detections %}{{ d.label }} ({{ d.score|floatformat:2 }}){% if not forloop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
+    </dl>
+    <form method="post">
+      {% csrf_token %}
+      <label for="note"><strong>Note</strong></label>
+      <textarea id="note" name="note" maxlength="2000">{{ photo.note }}</textarea>
+      <button class="btn" type="submit">Save note</button>
+    </form>
+  </aside>
+</div>
+{% endblock %}

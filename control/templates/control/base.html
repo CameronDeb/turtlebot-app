@@ -1,0 +1,26 @@
+{% load versioned_static %}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}TurtleBot{% endblock %} · TurtleBot control</title>
+  <link rel="stylesheet" href="{% vstatic 'control/style.css' %}">
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="{% url 'control:control' %}">TurtleBot control</a>
+    <nav>
+      <a href="{% url 'control:control' %}" class="{% if request.resolver_match.url_name == 'control' %}active{% endif %}">Control</a>
+      <a href="{% url 'control:archive' %}" class="{% if request.resolver_match.url_name == 'archive' or request.resolver_match.url_name == 'photo_detail' %}active{% endif %}">Photo archive</a>
+      <a href="{% url 'admin:index' %}">Admin</a>
+    </nav>
+  </header>
+  <main>
+    {% if messages %}
+      <ul class="flash">{% for m in messages %}<li class="{{ m.tags }}">{{ m }}</li>{% endfor %}</ul>
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+  {% block scripts %}{% endblock %}
+</body>
+</html>
