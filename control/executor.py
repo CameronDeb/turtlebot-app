@@ -8,20 +8,30 @@ into the archive, and stops between steps as soon as the user presses Stop.
 import logging
 import math
 import threading
+import time
 
 from django.db import close_old_connections, connections, transaction
 from django.db.models import Max
 from django.utils import timezone
 
-from . import planner
+from . import planner, vision
 from .archive import save_photo
 from .commands import describe, validate
+from .detector import DetectorError, get_detector
 from .models import Job, Trip, Waypoint
 from .robot import RobotError, get_robot
 
 logger = logging.getLogger(__name__)
 
 MAX_TRIES_PER_TARGET = 4
+
+# Object search
+BODY_FRONT = 0.17  # bumper distance from the robot centre (m)
+FIND_MAX_LEG = 1.0  # drive at most this far before looking again
+FIND_MAX_LEGS = 12
+FIND_CENTER_DEG = 2.5  # turn toward the object when it is further off-centre than this
+FIND_UNKNOWN_STEP = 0.30  # leg length when the distance can't be estimated
+FIND_NEAR = 0.9  # m: an object lost from view closer than this has gone below the camera's view
 
 
 class Busy(Exception):
@@ -107,6 +117,8 @@ class JobContext:
     def _finish_motion(result, what):
         if result.outcome == "canceled":
             raise Canceled()
+        if result.outcome == "obstacle":
+            return  # stopped by the lidar watch: the caller decides what that means
         if not result.succeeded:
             raise RobotError(f"{what} didn't finish (robot reported '{result.outcome}': bumper, cliff or wheel stall?)")
 
@@ -131,13 +143,27 @@ class JobContext:
 
     def photo(self, scan_index=None):
         self.check()
-        data = self.robot.photo()
+        return self.save(self.robot.photo(), scan_index=scan_index)
+
+    def save(self, data, scan_index=None, detections=None):
         try:
-            photo = save_photo(data, job=self.job, trip=active_trip(), scan_index=scan_index)
+            photo = save_photo(data, job=self.job, trip=active_trip(), scan_index=scan_index, detections=detections)
         except ValueError as e:
             raise RobotError(str(e)) from None
         self.result.setdefault("photo_ids", []).append(photo.id)
         return photo
+
+    def look(self, query, scan_index=None):
+        """Take a picture, find `query` in it, locate each hit, archive the picture with its detections."""
+        self.check()
+        data = self.robot.photo()
+        try:
+            dets = get_detector().detect(data, query)
+        except DetectorError as e:
+            raise RobotError(str(e)) from None
+        located = [{**d, **vision.locate(d, data, range_at=self.robot.range_at)} for d in dets]
+        photo = self.save(data, scan_index=scan_index, detections=located)
+        return photo, data, located
 
 
 # ---------------------------------------------------------------- command handlers
@@ -152,7 +178,15 @@ def _moved(result):
 def do_forward(ctx, p):
     r = ctx.drive(p["distance"], p["check_clear"])
     moved = _moved(r)
-    return f"Drove {moved:.2f} m." if moved is not None else "Drove forward."
+    raw = r.raw or {}
+    done = f"Drove {moved:.2f} m" if moved is not None else "Drove forward"
+    if r.outcome == "obstacle":
+        return f"{done}, then stopped: something came right up to the front of the robot."
+    if raw.get("shortened"):
+        gap = raw.get("obstacle_gap")
+        where = f" {gap:.2f} m ahead" if gap is not None else ""
+        return f"{done} of the {p['distance']:g} m asked, stopping short of an obstacle{where}."
+    return done + "."
 
 
 def do_turn(ctx, p):
@@ -262,6 +296,156 @@ def do_return_home(ctx, p):
     return "Back at the start, facing the way it started."
 
 
+def _pick(dets):
+    """The detection to go for: among the strong ones (>= 75% of the best score), the most central."""
+    if not dets:
+        return None
+    top = max(d["score"] for d in dets)
+    strong = [d for d in dets if d["score"] >= 0.75 * top]
+    return min(strong, key=lambda d: abs(d["bearing"]))
+
+
+def _ids(ctx):
+    ids = ctx.result.get("photo_ids", [])
+    if not ids:
+        return ""
+    return f" (photo #{ids[0]})" if len(ids) == 1 else f" (photos #{ids[0]}–#{ids[-1]})"
+
+
+def _fill_distance(det, expected):
+    """When the picture can't give a distance (or only a doubtful one), fall back on dead reckoning."""
+    if expected is None:
+        return det
+    if det["distance"] is None:
+        return {**det, "distance": expected}
+    if det["cut_off_bottom"] and "depth" not in det["cues"]:
+        return {**det, "distance": min(det["distance"], expected)}
+    return det
+
+
+SENSOR_WAIT = 30.0  # s; the TurtleBot's power saver stops the camera and lidar on the dock, and they take a while
+
+
+def _wait_for_sensors(ctx, timeout=SENSOR_WAIT):
+    """After undocking, wait until the lidar and a camera are streaming again."""
+    end = time.monotonic() + timeout
+    while True:
+        ctx.check()
+        s = ctx.robot.status()
+        cams = s.get("camera") or {}
+        cam_ok = any(age is not None and age < 1.0 for age in cams.values())
+        scan_ok = s.get("scan_age") is not None and s["scan_age"] < 1.0
+        if cam_ok and scan_ok:
+            return
+        if time.monotonic() > end:
+            missing = " and ".join(n for n, ok in (("camera", cam_ok), ("lidar", scan_ok)) if not ok)
+            raise RobotError(f"the {missing} didn't start within {timeout:.0f} s of leaving the dock")
+        time.sleep(0.5)
+
+
+def do_find(ctx, p):
+    """Look around for an object (open-vocabulary detection) and, if asked, drive up to it."""
+    query, standoff = p["object"], p["standoff"]
+    if ctx.robot.status().get("docked"):
+        do_undock(ctx, {})
+    _wait_for_sensors(ctx)
+
+    # 1. Search: pictures all the way round, overlapping, until the object shows up.
+    photo, data, dets = ctx.look(query, scan_index=0)
+    step = max(20.0, min(60.0, vision.horizontal_fov_deg(data) * 0.8))
+    n = math.ceil(360.0 / step)
+    step = 360.0 / n
+    looked = 1
+    while not dets:
+        if looked >= n:
+            raise RobotError(
+                f"couldn't see \"{query}\" anywhere around the robot{_ids(ctx)}. Try another spot or describe "
+                "it differently (e.g. \"blue cup\" instead of \"mug\")"
+            )
+        ctx.rotate(step)
+        photo, data, dets = ctx.look(query, scan_index=looked)
+        looked += 1
+    target = _pick(dets)
+    seen = f"Saw \"{query}\" (score {target['score']:.2f}) in photo #{photo.id}"
+
+    if not p["approach"]:
+        if abs(target["bearing"]) > FIND_CENTER_DEG:
+            ctx.rotate(target["bearing"])
+        far = f", about {target['distance']:.1f} m away" if target["distance"] else ""
+        return f"{seen}{far}, and turned to face it."
+
+    # 2. Approach: turn to it, drive part of the way, look again; repeat.
+    travelled, lost, last = 0.0, 0, target
+    for _ in range(FIND_MAX_LEGS):
+        ctx.check()
+        if abs(last["bearing"]) > FIND_CENTER_DEG:
+            expected = last["distance"]
+            ctx.rotate(last["bearing"])
+            photo, data, dets = ctx.look(query)
+            cand = _pick(dets)
+            if cand is None:
+                lost += 1
+                if lost >= 2:
+                    raise RobotError(f"lost sight of the {query} after turning toward it{_ids(ctx)}")
+                last = {**last, "bearing": 0.0}
+            else:
+                lost, last = 0, _fill_distance(cand, expected)
+        dist = last["distance"]
+        gap = None if dist is None else dist - BODY_FRONT
+        move = FIND_UNKNOWN_STEP if gap is None else gap - standoff
+        if gap is not None and move < 0.05:
+            return f"{seen}. Drove {travelled:.2f} m and stopped about {max(gap, 0):.2f} m in front of it{_ids(ctx)}."
+        move = min(move, FIND_MAX_LEG, p["max_range"] - travelled)
+        if move < 0.05:
+            raise RobotError(f"drove {travelled:.2f} m (the search limit) without reaching the {query}{_ids(ctx)}")
+        r = ctx.drive(move, check_clear=True)
+        moved = _moved(r)
+        moved = move if moved is None else moved
+        travelled += moved
+        raw = r.raw or {}
+        if r.outcome == "obstacle":
+            raise RobotError(
+                f"stopped after {travelled:.2f} m: something came right up to the front of the robot{_ids(ctx)}"
+            )
+        if raw.get("shortened") and moved < move - 0.03:
+            ob = raw.get("obstacle_gap")
+            if gap is not None and ob is not None and abs(ob - gap) < 0.25:
+                # The lidar sees the object itself (it is tall enough): this is as close as is safe.
+                return (
+                    f"{seen}. Drove {travelled:.2f} m and stopped about {max(ob - moved, 0):.2f} m in front of "
+                    f"it{_ids(ctx)}."
+                )
+            where = f"{ob:.2f} m ahead" if ob is not None else "ahead"
+            raise RobotError(
+                f"something is in the way ({where}) between the robot and the {query}; stopped after "
+                f"{travelled:.2f} m. Steer around it and run Find again{_ids(ctx)}"
+            )
+        remaining = None if dist is None else dist - moved
+        photo, data, dets = ctx.look(query)
+        cand = _pick(dets)
+        if cand is None:
+            if remaining is not None and remaining - BODY_FRONT < FIND_NEAR:
+                # Close and no longer in the picture: it has gone below the camera's view. Finish on dead reckoning.
+                creep = min(remaining - BODY_FRONT - standoff, 0.5)
+                if creep > 0.05:
+                    r = ctx.drive(creep, check_clear=True)
+                    crept = _moved(r)
+                    crept = creep if crept is None else crept
+                    travelled += crept
+                    remaining -= crept
+                return (
+                    f"{seen}. Drove {travelled:.2f} m; it is now below the camera's view, about "
+                    f"{max(remaining - BODY_FRONT, 0):.2f} m in front of the bumper{_ids(ctx)}."
+                )
+            lost += 1
+            if lost >= 2:
+                raise RobotError(f"lost sight of the {query} after driving {travelled:.2f} m{_ids(ctx)}")
+            last = {**last, "bearing": 0.0, "distance": remaining}
+            continue
+        lost, last = 0, _fill_distance(cand, remaining)
+    raise RobotError(f"didn't reach the {query} after {FIND_MAX_LEGS} legs ({travelled:.2f} m){_ids(ctx)}")
+
+
 def do_sequence(ctx, p):
     done = []
     for i, step in enumerate(p["steps"], 1):
@@ -282,6 +466,7 @@ HANDLERS = {
     "undock": do_undock,
     "dock": do_dock,
     "return_home": do_return_home,
+    "find": do_find,
     "sequence": do_sequence,
 }
 

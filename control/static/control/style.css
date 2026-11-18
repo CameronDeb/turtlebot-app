@@ -72,7 +72,14 @@ h2 { font-size: 1.05rem; }
 
 .latest { display: block; background: #0d1117; border-radius: 8px; min-height: 180px; color: #9aa7b4; text-align: center; overflow: hidden; }
 .latest img { display: block; width: 100%; height: auto; }
-.latest span { display: block; padding: 70px 10px; }
+.latest #latest-empty { display: block; padding: 70px 10px; }
+.boxwrap { position: relative; display: block; }
+.detbox { position: absolute; border: 2px solid #ff4d4f; box-sizing: border-box; pointer-events: none; }
+.detbox span { position: absolute; left: -2px; bottom: 100%; background: #ff4d4f; color: #fff; font-size: 11px;
+  line-height: 1.3; padding: 0 4px; white-space: nowrap; }
+.estop { display: flex; gap: 10px; align-items: center; justify-content: space-between; background: #fff1f0;
+  border: 1px solid #ffa39e; color: #a8071a; border-radius: 8px; padding: 8px 10px; margin: 10px 0; font-size: 0.92em; }
+.estop[hidden] { display: none; }
 #map { width: 100%; aspect-ratio: 1; background: #fafbfc; border: 1px solid var(--line); border-radius: 8px; }
 #map .grid { stroke: #e3e8ee; }
 #map .path { fill: none; stroke: #8c959f; stroke-linejoin: round; }

@@ -60,6 +60,12 @@ class PhotoData:
     height: int
     topic: str
     pose: Pose | None
+    # Pinhole intrinsics {"fx", "fy", "cx", "cy"} in pixels, when known.
+    intrinsics: dict | None = None
+    # Camera mount in base_link: {"x", "y", "z" (m), "yaw_deg", "pitch_deg" (+ = looking down)}, when known.
+    camera: dict | None = None
+    # Simulator only: ground truth of the objects in view, used by the simulated detector.
+    sim_objects: list | None = None
 
 
 class RobotClient:
@@ -87,6 +93,14 @@ class RobotClient:
         raise NotImplementedError
 
     def photo(self) -> PhotoData:
+        raise NotImplementedError
+
+    def range_at(self, bearing_deg, width_deg=6.0) -> float | None:
+        """Nearest lidar return (m from the robot centre) within +-width/2 of a bearing (+ = left), or None."""
+        raise NotImplementedError
+
+    def motors_on(self) -> dict:
+        """Clear the base's e-stop. Returns {"ok", "wheels_enabled", "message"}."""
         raise NotImplementedError
 
     def pose(self) -> Pose:

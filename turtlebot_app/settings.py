@@ -8,6 +8,7 @@ Everything machine-specific comes from environment variables (or a `.env` file n
   DJANGO_DEBUG         1/0, default 1 (this is a local lab tool served by runserver)
   DJANGO_ALLOWED_HOSTS comma-separated, default localhost,127.0.0.1
   ARCHIVE_DIR          where photos are stored, default ./archive
+  DETECTOR_*           object detector for "find" (see the block near the end; defaults work on the lab PC)
 """
 
 import os
@@ -127,6 +128,15 @@ ROBOT_SIM_DELAY = float(os.environ.get("ROBOT_SIM_DELAY", "1.0"))
 COMMAND_INTERPRETER = os.environ.get(
     "COMMAND_INTERPRETER", "control.interpreter.RuleBasedInterpreter"
 )
+
+# Object search: Grounding DINO server (detector/serve.py, in WSL). "auto" = simulated detector with the
+# simulated robot, the real one with the real robot.
+DETECTOR_BACKEND = os.environ.get("DETECTOR_BACKEND", "auto")
+DETECTOR_URL = os.environ.get("DETECTOR_URL", "http://127.0.0.1:8770")
+DETECTOR_THRESHOLD = float(os.environ.get("DETECTOR_THRESHOLD", "0.35"))
+DETECTOR_AUTOSTART = os.environ.get("DETECTOR_AUTOSTART", "1") == "1"
+DETECTOR_WSL_DISTRO = os.environ.get("DETECTOR_WSL_DISTRO", "Ubuntu-24.04")
+DETECTOR_CONDA_ENV = os.environ.get("DETECTOR_CONDA_ENV", "detect")
 
 LOGGING = {
     "version": 1,

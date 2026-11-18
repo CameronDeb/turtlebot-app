@@ -3,10 +3,12 @@ gate every command passes before the robot sees it."""
 
 import math
 
-MAX_FORWARD_M = 2.0
+MAX_FORWARD_M = 5.0  # obstacles shorten a move (the lidar watches while driving), so long moves are fine
 MIN_FORWARD_M = 0.05
 MAX_TURN_DEG = 360.0
 MAX_SEQUENCE = 20
+FIND_STANDOFF_M = (0.10, 1.0, 0.30)  # min, max, default gap left between the bumper and the object
+FIND_MAX_RANGE_M = (0.5, 8.0, 4.0)  # how far the search will drive in total
 
 KINDS = {
     "forward": "Drive forward",
@@ -16,6 +18,7 @@ KINDS = {
     "undock": "Undock",
     "dock": "Dock",
     "return_home": "Return to start / dock",
+    "find": "Find an object",
     "sequence": "Sequence",
 }
 
@@ -63,6 +66,23 @@ def validate(kind, params=None, _nested=False):
         if int(steps) != steps:
             raise CommandError("'steps' must be a whole number")
         return {"steps": int(steps)}
+    if kind == "find":
+        obj = params.get("object")
+        if not isinstance(obj, str):
+            raise CommandError("'object' must be text, e.g. \"red mug\"")
+        from .detector import clean_query
+
+        obj = clean_query(obj)
+        if not obj:
+            raise CommandError("say what to look for, e.g. \"red mug\"")
+        lo, hi, default = FIND_STANDOFF_M
+        rlo, rhi, rdefault = FIND_MAX_RANGE_M
+        return {
+            "object": obj,
+            "approach": _bool(params, "approach", True),
+            "standoff": round(float(_number(params, "standoff", lo, hi, default)), 3),
+            "max_range": round(float(_number(params, "max_range", rlo, rhi, rdefault)), 3),
+        }
     if kind == "return_home":
         return {"check_clear": _bool(params, "check_clear", True)}
     if kind == "sequence":
@@ -94,6 +114,8 @@ def describe(kind, params):
         return f"Turn {'left' if d > 0 else 'right'} {abs(d):g}°"
     if kind == "scan":
         return f"Scan 360° ({params['steps']} pictures)"
+    if kind == "find":
+        return f"Find \"{params['object']}\"" + (" and go to it" if params.get("approach", True) else "")
     if kind == "sequence":
         return " → ".join(describe(s["kind"], s["params"]) for s in params["steps"])
     return KINDS.get(kind, kind)

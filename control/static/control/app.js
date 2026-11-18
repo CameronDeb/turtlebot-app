@@ -57,6 +57,19 @@
     })
   );
 
+  $("find-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    const object = $("find-text").value.trim();
+    if (!object) return;
+    send({ kind: "find", params: { object, approach: $("find-approach").checked, standoff: parseFloat($("find-standoff").value) } });
+  });
+
+  $("motors-on").addEventListener("click", async () => {
+    const data = await post(TB.urls.motors);
+    showJobMessage(data.ok ? "Motors on." : data.error, data.ok ? "succeeded" : "failed");
+    poll();
+  });
+
   $("stop").addEventListener("click", async () => {
     const data = await post(TB.urls.stop);
     if (!data.ok) showJobMessage(data.error, "failed");
@@ -112,8 +125,9 @@
       conn.title = r.error || "";
     }
 
+    $("estop").hidden = !(r.connected && r.wheels_enabled === false);
     busy = !!state.job;
-    document.querySelectorAll("button.cmd").forEach((b) => (b.disabled = busy || !r.connected));
+    document.querySelectorAll("button.cmd, #find-btn").forEach((b) => (b.disabled = busy || !r.connected));
     if (state.job) {
       showJobMessage(state.job.description + "…", "running");
     } else if (!r.connected) {
@@ -152,12 +166,32 @@
       }
       img.hidden = false;
       $("latest-empty").hidden = true;
+      drawBoxes($("latest-boxes"), p);
       $("latest-link").href = p.detail_url;
       $("latest-meta").textContent = `#${p.id} · ${new Date(p.taken_at).toLocaleString([], { timeZone: TB.timeZone })}` +
         (p.pose ? ` · at ${p.pose.x.toFixed(2)}, ${p.pose.y.toFixed(2)} m` : "");
     }
 
     drawMap(trip, r.connected ? r.pose : null);
+  }
+
+  // Detection boxes over a picture, positioned in % so they follow the image's displayed size.
+  function drawBoxes(layer, p) {
+    layer.replaceChildren(
+      ...(p.detections || []).map((d) => {
+        const [x0, y0, x1, y1] = d.box;
+        const b = document.createElement("span");
+        b.className = "detbox";
+        b.style.left = `${(100 * x0) / p.width}%`;
+        b.style.top = `${(100 * y0) / p.height}%`;
+        b.style.width = `${(100 * (x1 - x0)) / p.width}%`;
+        b.style.height = `${(100 * (y1 - y0)) / p.height}%`;
+        const t = document.createElement("span");
+        t.textContent = `${d.label} ${d.score.toFixed(2)}` + (d.distance ? ` · ${d.distance.toFixed(2)} m` : "");
+        b.appendChild(t);
+        return b;
+      })
+    );
   }
 
   // Top-down map of the odom frame, drawn with +x pointing up the page and +y to the left.

@@ -5,6 +5,7 @@ import json
 import math
 import socket
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from .base import MotionResult, PhotoData, Pose, RobotBusy, RobotClient, RobotError, RobotUnreachable
@@ -55,6 +56,7 @@ class HttpRobotClient(RobotClient):
             "battery_percent": d.get("battery_percent"),
             "docked": d.get("docked"),
             "dock_visible": d.get("dock_visible"),
+            "wheels_enabled": d.get("wheels_enabled"),
             "busy": d.get("busy", False),
             "active": d.get("active"),
             "scan_age": d.get("scan_age"),
@@ -98,4 +100,13 @@ class HttpRobotClient(RobotClient):
             height=int(d["height"]),
             topic=d.get("topic", ""),
             pose=Pose.from_dict(d.get("pose")),
+            intrinsics=d.get("intrinsics"),
+            camera=d.get("camera"),
         )
+
+    def range_at(self, bearing_deg, width_deg=6.0):
+        q = urllib.parse.urlencode({"bearing": f"{bearing_deg:.2f}", "width": f"{width_deg:.2f}"})
+        return self._request("GET", f"/range?{q}", timeout=5.0).get("range")
+
+    def motors_on(self):
+        return self._request("POST", "/motors", {"enabled": True}, timeout=15.0)

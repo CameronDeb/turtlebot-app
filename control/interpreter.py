@@ -51,6 +51,14 @@ _RETURN = re.compile(
 )
 _UNDOCK = re.compile(r"^(?:undock|leave\s+the\s+dock|get\s+off\s+the\s+dock)$", re.I)
 _DOCK = re.compile(r"^(?:dock|go\s+dock|dock\s+now)$", re.I)
+# "find the red mug", "go to the chair", "search for my keys" -> look around and drive up to it
+_FIND_GO = re.compile(
+    r"^(?:find|fetch|search\s+for|look\s+for|go\s+(?:over\s+)?to|drive\s+to|head\s+to|navigate\s+to|"
+    r"approach)\s+(.+)$",
+    re.I,
+)
+# "where is the red mug", "locate the chair", "face the door" -> look around and turn to it, without driving
+_FIND_LOOK = re.compile(r"^(?:where\s+is|where's|locate|face|point\s+at|turn\s+to(?:ward)?s?)\s+(.+?)\??$", re.I)
 
 DEFAULT_FORWARD_M = 0.5
 DEFAULT_TURN_DEG = 90.0
@@ -89,6 +97,16 @@ class RuleBasedInterpreter(Interpreter):
             return "undock", {}
         if _DOCK.match(c):
             return "dock", {}
+        m_look, m_go = _FIND_LOOK.match(c), _FIND_GO.match(c)
+        if m_look or m_go:
+            target = re.sub(r"^(?:the|a|an|my)\s+", "", (m_look or m_go).group(1).strip(), flags=re.I).lower()
+            if target in ("dock", "home", "start", "base", "charger"):
+                if m_go:
+                    return "return_home", {}
+                raise InterpretError(f"I can't point at the {target}; say \"return to dock\" to go there")
+            if target in ("left", "right"):
+                return "turn", {"degrees": DEFAULT_TURN_DEG if target == "left" else -DEFAULT_TURN_DEG}
+            return "find", {"object": target, "approach": bool(m_go)}
         raise InterpretError(f"I don't understand \"{clause.strip()}\"")
 
     def interpret(self, text):

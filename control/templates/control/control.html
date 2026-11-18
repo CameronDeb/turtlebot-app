@@ -16,6 +16,11 @@
       <div><dt>Position</dt><dd id="pose">–</dd></div>
       <div><dt>Heading</dt><dd id="heading">–</dd></div>
     </dl>
+    <div id="estop" class="estop" hidden>
+      <span>Motors are off (e-stop). A short press of the robot's power button or the controller's ○/B button
+        does this.</span>
+      <button id="motors-on" class="btn secondary" type="button">Motors on</button>
+    </div>
     <div id="job" class="job idle">Idle</div>
     <button id="stop" class="btn stop" type="button">STOP</button>
   </section>
@@ -47,6 +52,22 @@
     </div>
     <p class="hint" id="trip-info">No trip yet: the first move starts recording the path home.</p>
 
+    <h2>Find an object</h2>
+    <form id="find-form" class="text-form">
+      <input id="find-text" type="text" maxlength="60" autocomplete="off" placeholder="e.g. red mug, backpack, chair">
+      <button class="btn cmd-find" type="submit" id="find-btn">Find</button>
+    </form>
+    <div class="row">
+      <label class="check"><input type="checkbox" id="find-approach" checked> Drive up to it</label>
+      <label>Stop
+        <select id="find-standoff">
+          <option value="0.15">0.15 m</option><option value="0.3" selected>0.3 m</option><option value="0.5">0.5 m</option>
+        </select> in front
+      </label>
+    </div>
+    <p class="hint">Looks all the way round, then turns to the best match and drives up to it in steps, checking
+      again after each one. Obstacles in the way stop it; it doesn't plan a way round them yet.</p>
+
     <h2>Type a command</h2>
     <form id="text-form" class="text-form">
       <input id="text" type="text" maxlength="500" autocomplete="off"
@@ -54,7 +75,8 @@
       <button class="btn secondary" type="button" id="preview-btn">Check</button>
       <button class="btn" type="submit">Run</button>
     </form>
-    <p class="hint" id="text-result">Understands: forward / turn left|right / turn around / take a picture / scan / undock / dock / return home.</p>
+    <p class="hint" id="text-result">Understands: forward / turn left|right / turn around / take a picture / scan / undock / dock / return home /
+      find the … / go to the … / where is the ….</p>
   </section>
 
   <section class="card photo-card">
@@ -62,7 +84,7 @@
       <h2>Latest picture</h2>
       <a href="{% url 'control:archive' %}">Archive →</a>
     </div>
-    <a id="latest-link" href="#" class="latest"><img id="latest-img" alt="" hidden><span id="latest-empty">No pictures yet.</span></a>
+    <a id="latest-link" href="#" class="latest"><span class="boxwrap"><img id="latest-img" alt="" hidden><span id="latest-boxes"></span></span><span id="latest-empty">No pictures yet.</span></a>
     <p class="hint" id="latest-meta"></p>
   </section>
 
@@ -86,6 +108,7 @@
       submit: "{% url 'control:api_submit' %}",
       stop: "{% url 'control:api_stop' %}",
       interpret: "{% url 'control:api_interpret' %}",
+      motors: "{% url 'control:api_motors' %}",
     },
     timeZone: "{{ time_zone }}",  // show times in the lab's zone (settings.TIME_ZONE), whatever the PC clock says
   };

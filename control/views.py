@@ -16,7 +16,7 @@ from .interpreter import InterpretError, get_interpreter
 from .models import Job, Photo, Trip
 from .robot import RobotError, get_robot
 
-FORWARD_CHOICES = [0.1, 0.25, 0.5, 1.0, 1.5, 2.0]
+FORWARD_CHOICES = [0.1, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0]
 TURN_CHOICES = [15, 30, 45, 90, 180]
 
 
@@ -129,6 +129,7 @@ def api_state(request):
             "battery_percent": s.get("battery_percent"),
             "docked": s.get("docked"),
             "dock_visible": s.get("dock_visible"),
+            "wheels_enabled": s.get("wheels_enabled"),
             "busy": s.get("busy"),
             "scan_age": s.get("scan_age"),
             "camera": s.get("camera", {}),
@@ -213,6 +214,20 @@ def api_interpret(request):
         data["preview"] = preview
         return JsonResponse(data)
     return response
+
+
+@require_POST
+def api_motors(request):
+    """Turn the drive motors back on after an e-stop (Create 3 power button / controller B)."""
+    if executor.current_job_id is not None:
+        return _error("wait until the current command has finished", 409)
+    try:
+        result = get_robot().motors_on()
+    except RobotError as e:
+        return _error(str(e), 502)
+    if not result.get("ok"):
+        return _error("the robot didn't turn its motors back on; check the light ring, or restart the base", 502)
+    return JsonResponse({"ok": True})
 
 
 @require_GET

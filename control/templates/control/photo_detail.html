@@ -17,7 +17,7 @@
       {% if photo.job %}<dt>Command</dt><dd>{{ photo.job.kind }}{% if photo.job.text %} (“{{ photo.job.text }}”){% endif %}</dd>{% endif %}
       <dt>Files</dt>
       <dd><a href="{{ photo.image.url }}" download>Image (PNG)</a>{% if photo.depth %} · <a href="{{ photo.depth.url }}" download>Depth (16-bit PNG, mm)</a>{% endif %}</dd>
-      {% if photo.detections %}<dt>Detections</dt><dd>{% for d in photo.detections %}{{ d.label }} ({{ d.score|floatformat:2 }}){% if not forloop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
+      {% if photo.detections %}<dt>Detections</dt><dd>{% for d in photo.detections %}{{ d.label }} ({{ d.score|floatformat:2 }}{% if d.distance %}, ~{{ d.distance|floatformat:2 }} m{% endif %}{% if d.bearing is not None %}, {{ d.bearing|floatformat:0 }}°{% endif %}){% if not forloop.last %}, {% endif %}{% endfor %}</dd>{% endif %}
     </dl>
     <form method="post">
       {% csrf_token %}

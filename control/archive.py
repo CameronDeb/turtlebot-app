@@ -12,7 +12,7 @@ from .models import Photo
 THUMB_SIZE = (320, 320)
 
 
-def save_photo(data, job=None, trip=None, scan_index=None):
+def save_photo(data, job=None, trip=None, scan_index=None, detections=None):
     """Store a PhotoData from the robot and return the saved Photo."""
     try:
         img = Image.open(io.BytesIO(data.rgb_png))
@@ -27,6 +27,7 @@ def save_photo(data, job=None, trip=None, scan_index=None):
         job=job,
         trip=trip,
         scan_index=scan_index,
+        detections=detections or [],
     )
     if data.pose is not None:
         photo.x, photo.y, photo.yaw = data.pose.x, data.pose.y, data.pose.yaw

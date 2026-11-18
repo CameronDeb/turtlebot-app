@@ -2,7 +2,11 @@
 
 Matches the real robot's behaviour where the app depends on it: starts docked at the origin facing the dock (+x);
 undock backs up 0.35 m and turns 180 deg; dock only works from within 1 m while facing the dock; the lidar check
-fails while docked; a motion can be stopped part-way.
+fails while docked; a forward move is shortened to stop 0.10 m before an obstacle in its path (refused only when
+there is no room); a motion can be stopped part-way; the motors can be switched off (e-stop).
+
+Obstacles are points the lidar sees. Objects are small things on the floor (below the lidar) that the camera sees
+and the simulated detector reports, so the whole object search can be tried without the robot.
 """
 
 import io
@@ -14,6 +18,15 @@ from PIL import Image, ImageDraw
 
 from .base import MotionResult, PhotoData, Pose, RobotBusy, RobotClient, RobotError
 
+BODY_FRONT = 0.17
+PATH_HALF_WIDTH = 0.21
+MARGIN = 0.10
+IMAGE_W, IMAGE_H = 640, 360
+INTRINSICS = {"fx": 514.0, "fy": 514.0, "cx": 320.0, "cy": 180.0}
+CAMERA = {"x": 0.0, "y": 0.0, "z": 0.244, "yaw_deg": 0.0, "pitch_deg": 0.0}
+OBJECT_RADIUS = 0.04
+OBJECT_HEIGHT = 0.12
+
 
 def _wrap(a):
     return (a + math.pi) % (2 * math.pi) - math.pi
@@ -22,14 +35,16 @@ def _wrap(a):
 class SimRobotClient(RobotClient):
     name = "sim"
 
-    def __init__(self, delay=1.0, obstacles=()):
+    def __init__(self, delay=1.0, obstacles=(), objects=()):
         self.delay = delay  # seconds per motion
-        self.obstacles = list(obstacles)  # (x, y) points the clear-ahead check looks for
+        self.obstacles = list(obstacles)  # (x, y) points the lidar sees
+        self.objects = list(objects)  # (label, x, y) small objects on the floor the camera sees
         self._lock = threading.Lock()
         self._busy = threading.Lock()
         self._stop = threading.Event()
         self.x = self.y = self.yaw = 0.0
         self.docked = True
+        self.wheels_enabled = True
 
     # ---- state
 
@@ -42,6 +57,11 @@ class SimRobotClient(RobotClient):
         bearing = math.atan2(-self.y, -self.x)
         return math.hypot(self.x, self.y) < 1.0 and abs(_wrap(bearing - self.yaw)) < math.radians(30)
 
+    def _local(self, px, py):
+        """World point -> (ahead, left) in the robot frame."""
+        dx, dy = px - self.x, py - self.y
+        return dx * math.cos(self.yaw) + dy * math.sin(self.yaw), -dx * math.sin(self.yaw) + dy * math.cos(self.yaw)
+
     def status(self):
         with self._lock:
             return {
@@ -51,11 +71,17 @@ class SimRobotClient(RobotClient):
                 "battery_percent": 87.0,
                 "docked": self.docked,
                 "dock_visible": self._sees_dock(),
+                "wheels_enabled": self.wheels_enabled,
                 "busy": self._busy.locked(),
                 "active": None,
                 "scan_age": None if self.docked else 0.1,
                 "camera": {"rgbd_age": 0.1, "depth_age": 0.1, "stock_age": None},
             }
+
+    def motors_on(self):
+        with self._lock:
+            self.wheels_enabled = True
+        return {"ok": True, "wheels_enabled": True, "message": ""}
 
     # ---- motion
 
@@ -70,7 +96,7 @@ class SimRobotClient(RobotClient):
                 time.sleep(self.delay / steps)
         return True
 
-    def _motion(self, fn):
+    def _motion(self, fn, raw=None):
         if not self._busy.acquire(blocking=False):
             raise RobotBusy("robot is busy")
         try:
@@ -80,26 +106,44 @@ class SimRobotClient(RobotClient):
             outcome, docked = fn()
             with self._lock:
                 after = self._pose()
-            return MotionResult(outcome, before, after, is_docked=docked)
+            return MotionResult(outcome, before, after, is_docked=docked, raw=raw)
         finally:
             self._busy.release()
 
+    def _check_motors(self):
+        if not self.wheels_enabled:
+            raise RobotError("the robot's motors are off (e-stop); press 'Motors on'")
+
+    def gap_ahead(self):
+        gap = math.inf
+        for ox, oy in self.obstacles:
+            ahead, side = self._local(ox, oy)
+            if abs(side) < PATH_HALF_WIDTH and ahead > 0:
+                gap = min(gap, max(ahead - BODY_FRONT, 0.0))
+        return gap
+
     def drive(self, distance, check_clear=True):
-        if not 0 < distance <= 3.0:
-            raise RobotError("'distance' must be between 0.01 and 3.0")
-        if check_clear:
-            with self._lock:
+        if not 0 < distance <= 5.0:
+            raise RobotError("'distance' must be between 0.01 and 5.0")
+        requested, gap = distance, None
+        with self._lock:
+            self._check_motors()
+            if check_clear:
                 if self.docked:
                     raise RobotError(
                         "no recent lidar scan, so the path can't be checked (the lidar stops while docked: "
                         "undock first, or turn off the obstacle check)"
                     )
-                for ox, oy in self.obstacles:
-                    dx, dy = ox - self.x, oy - self.y
-                    ahead = dx * math.cos(self.yaw) + dy * math.sin(self.yaw)
-                    side = -dx * math.sin(self.yaw) + dy * math.cos(self.yaw)
-                    if abs(side) < 0.21 and 0.17 < ahead < 0.17 + distance + 0.15:
-                        raise RobotError(f"path blocked: obstacle {ahead - 0.17:.2f} m ahead of the bumper")
+                gap = self.gap_ahead()
+                if gap - MARGIN < 0.02:
+                    raise RobotError(f"path blocked: obstacle {gap:.2f} m ahead of the bumper (no room to move forward)")
+                distance = min(distance, gap - MARGIN)
+        raw = {
+            "requested": {"distance": requested},
+            "planned_distance": round(distance, 3),
+            "shortened": distance < requested - 1e-6,
+            "obstacle_gap": None if gap is None or math.isinf(gap) else round(gap, 3),
+        }
 
         def fn():
             steps = 20
@@ -112,11 +156,13 @@ class SimRobotClient(RobotClient):
 
             return ("succeeded" if self._animate(steps, s) else "canceled"), None
 
-        return self._motion(fn)
+        return self._motion(fn, raw)
 
     def rotate(self, angle_deg):
         if not -360 <= angle_deg <= 360:
             raise RobotError("'angle_deg' must be between -360 and 360")
+        with self._lock:
+            self._check_motors()
 
         def fn():
             steps = 20
@@ -164,18 +210,54 @@ class SimRobotClient(RobotClient):
     def stop(self):
         self._stop.set()
 
+    def range_at(self, bearing_deg, width_deg=6.0):
+        with self._lock:
+            if self.docked:
+                raise RobotError("no recent lidar scan (the lidar stops while docked)")
+            best = None
+            for ox, oy in self.obstacles:
+                ahead, side = self._local(ox, oy)
+                ang = math.degrees(math.atan2(side, ahead))
+                if abs((ang - bearing_deg + 180) % 360 - 180) <= width_deg / 2:
+                    d = math.hypot(ahead, side)
+                    best = d if best is None else min(best, d)
+            return None if best is None else round(best, 3)
+
     # ---- camera
+
+    def _project(self):
+        """Objects in view: [{"label", "box": [x0, y0, x1, y1], "distance"}], boxes clipped to the image."""
+        fx, fy, cx, cy = (INTRINSICS[k] for k in ("fx", "fy", "cx", "cy"))
+        out = []
+        for label, ox, oy in self.objects:
+            ahead, left = self._local(ox, oy)
+            ahead -= CAMERA["x"]
+            if ahead < 0.15:
+                continue
+            u = cx - fx * left / ahead
+            half = fx * OBJECT_RADIUS / ahead
+            v_bottom = cy + fy * CAMERA["z"] / ahead
+            v_top = cy + fy * (CAMERA["z"] - OBJECT_HEIGHT) / ahead
+            x0, x1 = max(u - half, 0), min(u + half, IMAGE_W - 1)
+            y0, y1 = max(v_top, 0), min(v_bottom, IMAGE_H - 1)
+            if x1 - x0 < 2 or y1 - y0 < 2:
+                continue
+            out.append({"label": label, "box": [x0, y0, x1, y1], "distance": math.hypot(ahead, left)})
+        return out
 
     def photo(self):
         with self._lock:
             pose = self._pose()
-        w, h = 640, 360
-        img = Image.new("RGB", (w, h), (40, 60, 90))
+            seen = self._project()
+        img = Image.new("RGB", (IMAGE_W, IMAGE_H), (40, 60, 90))
         draw = ImageDraw.Draw(img)
         hue = int((math.degrees(pose.yaw) % 360) / 360 * 200)
-        for i in range(0, w, 40):
-            draw.line([(i, 0), (i, h)], fill=(60 + hue // 3, 80, 110))
-        draw.rectangle([0, h * 2 // 3, w, h], fill=(150, 150, 140))
+        for i in range(0, IMAGE_W, 40):
+            draw.line([(i, 0), (i, IMAGE_H)], fill=(60 + hue // 3, 80, 110))
+        draw.rectangle([0, INTRINSICS["cy"], IMAGE_W, IMAGE_H], fill=(150, 150, 140))
+        for obj in seen:
+            draw.rectangle(obj["box"], fill=(200, 50, 50))
+            draw.text((obj["box"][0], max(obj["box"][1] - 12, 0)), obj["label"], fill=(255, 255, 255))
         draw.text((20, 20), "SIMULATED TURTLEBOT", fill=(255, 255, 255))
         draw.text(
             (20, 40),
@@ -184,7 +266,17 @@ class SimRobotClient(RobotClient):
         )
         buf = io.BytesIO()
         img.save(buf, "PNG")
-        depth = Image.new("I;16", (w, h), 2000)
+        depth = Image.new("I;16", (IMAGE_W, IMAGE_H), 0)  # no depth: object search uses the floor geometry
         dbuf = io.BytesIO()
         depth.save(dbuf, "PNG")
-        return PhotoData(buf.getvalue(), dbuf.getvalue(), w, h, "simulator", pose)
+        return PhotoData(
+            buf.getvalue(),
+            dbuf.getvalue(),
+            IMAGE_W,
+            IMAGE_H,
+            "simulator",
+            pose,
+            intrinsics=dict(INTRINSICS),
+            camera=dict(CAMERA),
+            sim_objects=seen,
+        )

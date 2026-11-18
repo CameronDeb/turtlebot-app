@@ -29,3 +29,19 @@
   in paper_ideas.md.
 - Arm: Cameron is working on a 3D-printed mount for the SO-101 follower on the TurtleBot.
 - Next lab visit: first real-robot run of the web app (Cameron agreed).
+
+## 2026-11-18: first time on the real robot, e-stop, object search, mount research (Claude + Cameron, lab)
+- Pushed the 2026-11-17 context notes (b8d23fc).
+- Robot online: installed the agent and token (logged in turtlebot-gs/notes/session_log.md). Status and photos work
+  through the app.
+- A 0.25 m forward was accepted but never moved. Cause: `/wheel_status.wheels_enabled = false`, i.e. the Create 3
+  e-stop was on (power button short press or controller B toggles it). Cleared with `/e_stop {e_stop_on: false}`.
+  The robot's power saver also stops the camera and lidar while docked.
+- Cameron asked for: GUI driving that works, autonomous "go to a named object", no over-restrictive safety stop, and
+  research for an SO-101 mount hanging in front for floor pickups.
+- Built: agent 1.1 (shortened moves, lidar watch while driving, motors/e-stop, /range, camera geometry), Find in the
+  app (Grounding DINO server in WSL, bearing/distance from the picture, approach in ≤1 m legs), UI Find card, e-stop
+  banner, detection boxes, 13 new tests (51 total, all pass on the simulator). Detector checked on a real robot photo.
+- Mount research written up in arm_mount.md (TurtleBot 4 plate/standoff CAD, SO-101 base and reach from its URDF).
+- Bug caught by the new tests: a box in front of the object was taken as the object's distance (lidar), so the
+  robot "arrived" at the box. Fixed: lidar only tightens the camera estimate when they agree within 0.3 m.

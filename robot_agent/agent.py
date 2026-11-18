@@ -8,15 +8,23 @@ Endpoints (JSON; every request except GET /ping needs the header `X-Agent-Token:
   GET  /ping                          liveness, no auth
   GET  /status                        pose (odom -> base_link), battery, dock, sensor ages, busy
   GET  /photo                         a fresh camera frame: base64 PNG (+ aligned 16-bit depth PNG when available)
+  GET  /range?bearing=deg&width=deg  nearest lidar return within +-width/2 of a bearing (base_link, + = left)
   POST /drive   {"distance": m, "speed": m/s, "check_clear": bool, "margin": m}   forward only
   POST /rotate  {"angle_deg": deg (+ = left/CCW), "speed": rad/s}
   POST /undock  {}
   POST /dock    {}
   POST /stop    {}                    cancels the running motion (works while another request is in progress)
+  POST /motors  {"enabled": true}     clears the Create 3 e-stop (a short press of the power button or the
+                                      controller's B/Circle button toggles it and cuts drive power)
 
-Motion endpoints return 200 with "outcome" = succeeded | canceled | aborted plus the pose before and after, so the
-caller can log what really happened even when a motion was stopped part-way. Errors that prevent a motion from
-starting (busy, blocked path, no lidar, bad input) return 4xx/5xx with {"ok": false, "error": "..."}.
+Obstacle handling for /drive with check_clear (the default): the move is shortened to stop `margin` before the
+nearest lidar return in the robot's path (it is refused only if there is no room at all), and the lidar keeps
+watching while the robot drives, cancelling the motion if something comes within STOP_GAP of the bumper.
+
+Motion endpoints return 200 with "outcome" = succeeded | canceled | aborted | obstacle plus the pose before and
+after, so the caller can log what really happened even when a motion was stopped part-way. Errors that prevent a
+motion from starting (busy, blocked path, no lidar, motors off, bad input) return 4xx/5xx with
+{"ok": false, "error": "..."}.
 
 Run:  AGENT_TOKEN=<secret> ./run_agent.sh        (see README.md)
 """
@@ -31,6 +39,7 @@ import struct
 import threading
 import time
 import zlib
+from urllib.parse import parse_qs
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
@@ -39,7 +48,8 @@ import tf2_ros
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import TwistStamped
 from irobot_create_msgs.action import Dock, DriveDistance, RotateAngle, Undock
-from irobot_create_msgs.msg import DockStatus
+from irobot_create_msgs.msg import DockStatus, WheelStatus
+from irobot_create_msgs.srv import EStop
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import MultiThreadedExecutor
@@ -49,10 +59,10 @@ from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
 from sensor_msgs.msg import BatteryState, Image, LaserScan
 
-VERSION = "1.0"
+VERSION = "1.1"
 
 # Motion limits (the web app uses smaller ones; these are the hard caps on the robot side).
-MAX_DRIVE_M = 3.0
+MAX_DRIVE_M = 5.0
 MAX_DRIVE_SPEED = 0.3  # m/s, Create 3 maximum is 0.306
 DEFAULT_DRIVE_SPEED = 0.15
 MAX_ROTATE_DEG = 360.0
@@ -63,7 +73,9 @@ DEFAULT_ROTATE_SPEED = 0.5
 BODY_HALF = 0.19  # lidar points inside this square are the robot itself (TurtleBot 4 radius ~0.17 m + posts)
 BODY_FRONT = 0.17  # front bumper distance from base_link
 PATH_HALF_WIDTH = 0.21  # half width of the corridor the robot sweeps
-DEFAULT_MARGIN = 0.15  # extra clearance beyond the end of the move
+DEFAULT_MARGIN = 0.10  # stop this far before the nearest obstacle in the path
+STOP_GAP = 0.06  # while driving: cancel if anything is closer than this to the bumper
+LOOK_AHEAD = 6.0  # how far ahead the path is checked (m)
 SCAN_MAX_AGE = (
     1.0  # s; the lidar motor stops while docked, so a docked robot has no fresh scan
 )
@@ -74,6 +86,13 @@ CAMERA_RGB = (
 CAMERA_DEPTH = "/oakd_rgbd/stereo/image_raw"  # depth aligned to that RGB, 16UC1 mm
 CAMERA_STOCK = "/oakd/rgb/preview/image_raw"  # stock bringup preview, 250x250, no depth
 PHOTO_WAIT = 4.0  # s to wait for a frame captured after the request
+# Pinhole intrinsics per topic (fx, fy, cx, cy); the robot publishes no camera_info for these.
+# Stock preview: 1080P sensor, ISP 1280x720 (HFOV ~69 deg), centre-cropped to 720x720 and scaled to 250x250.
+# Our RGB-D node: 640x360, from the calibration in turtlebot-gs/tools/bag_to_tum.py.
+INTRINSICS = {
+    CAMERA_STOCK: (323.5, 323.5, 125.0, 125.0),
+    CAMERA_RGB: (514.0, 514.0, 324.5, 180.0),
+}
 
 
 class AgentError(Exception):
@@ -201,6 +220,7 @@ class RobotBridge(Node):
             k: ActionClient(self, types[k], name, callback_group=cb)
             for k, name in self.action_names.items()
         }
+        self.estop = self.create_client(EStop, "/e_stop", callback_group=cb)
         for topic, mtype in (
             (CAMERA_RGB, Image),
             (CAMERA_DEPTH, Image),
@@ -208,6 +228,7 @@ class RobotBridge(Node):
             ("/scan", LaserScan),
             ("/battery_state", BatteryState),
             ("/dock_status", DockStatus),
+            ("/wheel_status", WheelStatus),
         ):
             self.create_subscription(
                 mtype,
@@ -268,6 +289,7 @@ class RobotBridge(Node):
             "battery_age": self.age("/battery_state"),
             "docked": None if dock is None else bool(dock.is_docked),
             "dock_visible": None if dock is None else bool(dock.dock_visible),
+            "wheels_enabled": self.wheels_enabled(),
             "scan_age": self.age("/scan"),
             "camera": {
                 "rgbd_age": self.age(CAMERA_RGB),
@@ -279,9 +301,10 @@ class RobotBridge(Node):
             "actions_ready": {k: c.server_is_ready() for k, c in self.actions.items()},
         }
 
-    # ---- clear-ahead check
+    # ---- lidar
 
-    def check_clear(self, distance, margin):
+    def scan_points(self):
+        """Fresh lidar returns in base_link (x forward, y left), robot body removed: (bx, by) arrays."""
         scan, received = self.latest("/scan")
         if scan is None or time.monotonic() - received > SCAN_MAX_AGE:
             raise AgentError(
@@ -308,34 +331,95 @@ class RobotBridge(Node):
         valid = (
             np.isfinite(r) & (r >= max(scan.range_min, 0.05)) & (r <= scan.range_max)
         )
+        r, a = r[valid], a[valid]
         lx, ly = r * np.cos(a), r * np.sin(a)
         bx = tx + math.cos(tyaw) * lx - math.sin(tyaw) * ly
         by = ty + math.sin(tyaw) * lx + math.cos(tyaw) * ly
         own_body = (np.abs(bx) < BODY_HALF) & (np.abs(by) < BODY_HALF)
+        return bx[~own_body], by[~own_body]
+
+    def gap_ahead(self):
+        """Free distance in front of the bumper along the corridor the robot sweeps (inf if clear to LOOK_AHEAD)."""
+        bx, by = self.scan_points()
         in_path = (
-            valid
-            & ~own_body
-            & (bx > 0)
-            & (bx < BODY_FRONT + distance + margin)
-            & (np.abs(by) < PATH_HALF_WIDTH)
+            (bx > 0) & (bx < BODY_FRONT + LOOK_AHEAD) & (np.abs(by) < PATH_HALF_WIDTH)
         )
-        if in_path.any():
-            gap = float(bx[in_path].min()) - BODY_FRONT
-            raise AgentError(
-                409,
-                f"path blocked: obstacle {max(gap, 0.0):.2f} m ahead of the bumper "
-                f"(move needs {distance:.2f} m + {margin:.2f} m margin)",
-            )
+        if not in_path.any():
+            return math.inf
+        return max(float(bx[in_path].min()) - BODY_FRONT, 0.0)
+
+    def range_at(self, bearing_deg, width_deg):
+        """Nearest lidar return (distance from base_link) within +-width/2 of a bearing, or None."""
+        bx, by = self.scan_points()
+        ang = np.degrees(np.arctan2(by, bx))
+        diff = (ang - bearing_deg + 180.0) % 360.0 - 180.0
+        sel = np.abs(diff) <= width_deg / 2.0
+        if not sel.any():
+            return None
+        return round(float(np.hypot(bx[sel], by[sel]).min()), 3)
+
+    def wheels_enabled(self):
+        wheels, t = self.latest("/wheel_status")
+        if wheels is None or time.monotonic() - t > 2.0:
+            return None
+        return bool(wheels.wheels_enabled)
+
+    def clear_estop(self):
+        if not self.estop.wait_for_service(timeout_sec=3.0):
+            raise AgentError(503, "/e_stop service not available")
+        fut = self.estop.call_async(EStop.Request(e_stop_on=False))
+        if not wait_future(fut, 5.0):
+            raise AgentError(504, "/e_stop: no answer")
+        deadline = time.monotonic() + 3.0
+        while time.monotonic() < deadline and self.wheels_enabled() is not True:
+            time.sleep(0.1)
+        enabled = self.wheels_enabled()
+        return {"ok": enabled is True, "wheels_enabled": enabled, "message": fut.result().message}
+
+    def camera_geometry(self, frame):
+        """Camera position (m) in base_link and its optical axis as yaw / pitch (deg, pitch + = looking down)."""
+        if not frame:
+            return None
+        try:
+            tf = self.tf_buffer.lookup_transform("base_link", frame, Time())
+        except tf2_ros.TransformException:
+            return None
+        q = tf.transform.rotation
+        # optical frames look along +z, other camera frames along +x
+        vx, vy, vz = (0.0, 0.0, 1.0) if "optical" in frame else (1.0, 0.0, 0.0)
+        x, y, z, w = q.x, q.y, q.z, q.w
+        ux, uy, uz = y * vz - z * vy, z * vx - x * vz, x * vy - y * vx
+        ux, uy, uz = ux + w * vx, uy + w * vy, uz + w * vz
+        dx = vx + 2.0 * (y * uz - z * uy)
+        dy = vy + 2.0 * (z * ux - x * uz)
+        dz = vz + 2.0 * (x * uy - y * ux)
+        t = tf.transform.translation
+        return {
+            "x": round(t.x, 4),
+            "y": round(t.y, 4),
+            "z": round(t.z, 4),
+            "yaw_deg": round(math.degrees(math.atan2(dy, dx)), 2),
+            "pitch_deg": round(-math.degrees(math.asin(max(-1.0, min(1.0, dz)))), 2),
+        }
 
     # ---- actions
 
-    def run_motion(self, name, goal, timeout):
-        """Send one action goal and wait for it. Returns (outcome, result or None)."""
+    def run_motion(self, name, goal, timeout, watch=None):
+        """Send one action goal and wait for it. Returns (outcome, result or None).
+
+        watch: optional callable polled every 0.1 s while the goal runs; if it returns True the goal is canceled
+        and the outcome is "obstacle"."""
         if not self._motion_lock.acquire(blocking=False):
             raise AgentError(409, f"robot is busy ({self._active_name})")
         try:
             self._stop.clear()
             client = self.actions[name]
+            if name in ("drive", "rotate") and self.wheels_enabled() is False:
+                raise AgentError(
+                    409,
+                    "the robot's motors are off (e-stop). A short press of the Create 3 power button or the "
+                    "controller's B/Circle button toggles it; press 'Motors on' in the app to turn them back on",
+                )
             if not client.wait_for_server(timeout_sec=3.0):
                 raise AgentError(
                     503, f"{self.action_names[name]} action server not available"
@@ -352,6 +436,19 @@ class RobotBridge(Node):
             if self._stop.is_set():  # stop arrived while the goal was being accepted
                 handle.cancel_goal_async()
             result_future = handle.get_result_async()
+            if watch is not None:
+                end = time.monotonic() + timeout
+                while not result_future.done() and time.monotonic() < end:
+                    try:
+                        hit = watch()
+                    except AgentError:
+                        hit = False  # a momentarily stale scan doesn't stop the robot; the bumper still does
+                    if hit:
+                        handle.cancel_goal_async()
+                        self.publish_zero()
+                        wait_future(result_future, 3.0)
+                        return "obstacle", None
+                    time.sleep(0.1)
             if not wait_future(result_future, timeout):
                 handle.cancel_goal_async()
                 self.publish_zero()
@@ -422,6 +519,8 @@ class RobotBridge(Node):
             pose = self.pose()
         except AgentError:
             pose = None
+        camera = self.camera_geometry(rgb.header.frame_id)
+        fx, fy, cx, cy = INTRINSICS.get(topic, (None, None, None, None))
         rgb_arr = image_to_array(rgb)
         if rgb_arr.ndim == 2:
             rgb_arr = np.stack([rgb_arr] * 3, axis=-1)
@@ -436,6 +535,8 @@ class RobotBridge(Node):
                 "ascii"
             ),
             "depth_png": None,
+            "intrinsics": None if fx is None else {"fx": fx, "fy": fy, "cx": cx, "cy": cy},
+            "camera": camera,
         }
         if depth is not None:
             d = image_to_array(depth)
@@ -517,6 +618,22 @@ def make_handler(bridge, token):
                     return self.send_json(200, bridge.status())
                 if route == ("GET", "/photo"):
                     return self.send_json(200, bridge.photo())
+                if route == ("GET", "/range"):
+                    q = parse_qs(self.path.split("?", 1)[1] if "?" in self.path else "")
+                    try:
+                        bearing = float(q.get("bearing", ["0"])[0])
+                        width = float(q.get("width", ["6"])[0])
+                    except ValueError:
+                        raise AgentError(400, "bearing and width must be numbers")
+                    if not (math.isfinite(bearing) and 0.5 <= width <= 90):
+                        raise AgentError(400, "width must be between 0.5 and 90 degrees")
+                    return self.send_json(
+                        200, {"ok": True, "range": bridge.range_at(bearing, width)}
+                    )
+                if route == ("POST", "/motors"):
+                    if self.body().get("enabled") is not True:
+                        raise AgentError(400, 'send {"enabled": true}')
+                    return self.send_json(200, bridge.clear_estop())
                 if route == ("POST", "/stop"):
                     self.body()
                     return self.send_json(
@@ -562,14 +679,33 @@ def make_handler(bridge, token):
             if not isinstance(check, bool):
                 raise AgentError(400, "'check_clear' must be true or false")
             before = bridge.pose()
+            requested, gap, watch = distance, None, None
             if check:
-                bridge.check_clear(distance, margin)
+                gap = bridge.gap_ahead()
+                room = gap - margin
+                if room < 0.02:
+                    raise AgentError(
+                        409,
+                        f"path blocked: obstacle {gap:.2f} m ahead of the bumper (no room to move forward)",
+                    )
+                distance = min(distance, room)
+
+                def watch():
+                    return bridge.gap_ahead() < STOP_GAP
+
             goal = DriveDistance.Goal(distance=distance, max_translation_speed=speed)
             outcome, _ = bridge.run_motion(
-                "drive", goal, timeout=distance / speed * 2.0 + 10.0
+                "drive", goal, timeout=distance / speed * 2.0 + 10.0, watch=watch
             )
             return self.motion_reply(
-                before, outcome, {"requested": {"distance": distance}}
+                before,
+                outcome,
+                {
+                    "requested": {"distance": requested},
+                    "planned_distance": round(distance, 3),
+                    "shortened": distance < requested - 1e-6,
+                    "obstacle_gap": None if gap is None or math.isinf(gap) else round(gap, 3),
+                },
             )
 
         def rotate(self, body):

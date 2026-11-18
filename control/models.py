@@ -163,4 +163,5 @@ class Photo(models.Model):
             "height": self.height,
             "pose": None if self.x is None else {"x": self.x, "y": self.y, "yaw": self.yaw},
             "has_depth": bool(self.depth),
+            "detections": self.detections or [],
         }

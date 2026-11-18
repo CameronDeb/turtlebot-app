@@ -104,14 +104,32 @@ class ExecutorSimTests(TestCase):
         self.assertEqual(job.state, Job.SUCCEEDED, job.message)
         self.assertPose(0, 0, 0)
 
+    def test_obstacle_shortens_the_move(self):
+        self.robot.docked = False
+        self.robot.obstacles = [(0.8, 0.0)]  # 0.63 m ahead of the bumper
+        job = self.run_cmd("forward", distance=1.0)
+        self.assertEqual(job.state, Job.SUCCEEDED, job.message)
+        self.assertIn("stopping short of an obstacle 0.63 m ahead", job.message)
+        self.assertAlmostEqual(self.robot.x, 0.53, places=2)  # stops 0.10 m before it
+
     def test_blocked_path_fails_cleanly(self):
         self.robot.docked = False
-        self.robot.obstacles = [(0.8, 0.0)]
+        self.robot.obstacles = [(0.25, 0.0)]  # 0.08 m ahead of the bumper: no room
         job = self.run_cmd("forward", distance=1.0)
         self.assertEqual(job.state, Job.FAILED)
         self.assertIn("blocked", job.message)
+        self.assertEqual(self.robot.x, 0.0)
         job = self.run_cmd("forward", distance=1.0, check_clear=False)
         self.assertEqual(job.state, Job.SUCCEEDED)
+
+    def test_motors_off_refuses_motion(self):
+        self.robot.docked = False
+        self.robot.wheels_enabled = False
+        job = self.run_cmd("turn", degrees=90)
+        self.assertEqual(job.state, Job.FAILED)
+        self.assertIn("motors are off", job.message)
+        self.robot.motors_on()
+        self.assertEqual(self.run_cmd("turn", degrees=90).state, Job.SUCCEEDED)
 
     def test_photo_is_archived(self):
         job = self.run_cmd("photo")
@@ -134,7 +152,7 @@ class ExecutorSimTests(TestCase):
 
     def test_sequence_reports_failing_step(self):
         self.robot.docked = False
-        self.robot.obstacles = [(1.0, 0.0)]
+        self.robot.obstacles = [(0.25, 0.0)]
         job = self.run_cmd(
             "sequence",
             steps=[{"kind": "photo"}, {"kind": "forward", "params": {"distance": 1.5}}, {"kind": "photo"}],

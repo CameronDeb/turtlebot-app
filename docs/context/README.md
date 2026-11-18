@@ -11,6 +11,7 @@ or found out. No passwords or tokens in here (this repo is on GitHub).
 | [robot_facts.md](robot_facts.md) | TurtleBot 4 hardware/network/topic facts the app depends on |
 | [paper_ideas.md](paper_ideas.md) | Paper direction (find, fetch, remember) and novelty options |
 | [so101_arm.md](so101_arm.md) | SO-101 arm status (set up on Cameron's laptop) and the plan to mount it on the TurtleBot |
+| [arm_mount.md](arm_mount.md) | Mount design research: TurtleBot 4 plate/standoff dimensions, SO-101 base and reach, front-hanging bracket |
 
 Related, outside this repo (lab PC `C:\Users\uoavs\turtlebot-gs\notes\`): `HANDOFF.md` (contains passwords: never copy
 into this repo), `session_log.md`, `robot_config.md`, `object_goal_nav_plan.md`, `ideas_dynamic_and_arm.md`.

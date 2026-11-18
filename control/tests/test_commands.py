@@ -7,7 +7,7 @@ from control.interpreter import InterpretError, RuleBasedInterpreter
 class ValidateTests(SimpleTestCase):
     def test_forward_defaults_and_limits(self):
         self.assertEqual(validate("forward", {"distance": 0.5}), {"distance": 0.5, "check_clear": True})
-        for bad in (0, 0.01, 2.5, -1, "1", None, True, float("nan")):
+        for bad in (0, 0.01, 5.5, -1, "1", None, True, float("nan")):
             with self.assertRaises(CommandError):
                 validate("forward", {"distance": bad})
         with self.assertRaises(CommandError):
@@ -78,6 +78,6 @@ class InterpreterTests(SimpleTestCase):
         with self.assertRaisesMessage(InterpretError, "don't understand"):
             self.i.interpret("make me a sandwich")
         with self.assertRaisesMessage(InterpretError, "between"):
-            self.i.interpret("forward 5 m")
+            self.i.interpret("forward 6 m")
         with self.assertRaises(InterpretError):
             self.i.interpret("   ")
