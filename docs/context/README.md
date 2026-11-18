@@ -9,6 +9,7 @@ or found out. No passwords or tokens in here (this repo is on GitHub).
 | [history.md](history.md) | Dated log of what was done and decided |
 | [app_design.md](app_design.md) | How the web app + robot agent work, and why |
 | [robot_facts.md](robot_facts.md) | TurtleBot 4 hardware/network/topic facts the app depends on |
+| [paper_ideas.md](paper_ideas.md) | Paper direction (find, fetch, remember) and novelty options |
 | [so101_arm.md](so101_arm.md) | SO-101 arm status (set up on Cameron's laptop) and the plan to mount it on the TurtleBot |
 
 Related, outside this repo (lab PC `C:\Users\uoavs\turtlebot-gs\notes\`): `HANDOFF.md` (contains passwords: never copy

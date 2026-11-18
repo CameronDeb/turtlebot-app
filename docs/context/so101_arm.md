@@ -23,6 +23,7 @@ that laptop, with the helper scripts `so101_follower_gui.py`, `so101_poses.json`
   - Run interactive commands in a terminal Cameron can see.
 
 ## Plan
+- 2026-11-17: Cameron started a 3D-printed mount for the follower on the TurtleBot's top plate.
 Once the web app's LLM layer can find objects and drive to them, **the follower arm gets mounted on the TurtleBot** for
 pickup.
 - Power: give the arm its own battery, not the TurtleBot's, because the robot's USB hub already browned out once.

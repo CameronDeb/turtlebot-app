@@ -21,3 +21,11 @@
 - Also noted: Cameron's SO-101 arm setup on his laptop (see so101_arm.md). The arm will be mounted on the TurtleBot
   after the LLM object-finding works.
 - Cameron asked for this context folder to be kept up to date every session.
+
+## 2026-11-17: weekly report, paper direction, arm mount (Claude, lab PC)
+- Weekly report draft for Nov 16–22 at `turtlebot-gs/notes/weekly_report_2026-11-22.md`, with a 6-slide deck at
+  `turtlebot-gs/reports/weekly_2026-11-22.pptx`.
+- Paper direction "find, fetch, remember": rough LaTeX draft at `turtlebot-gs/paper/vsi_3dgs_draft.tex`; novelty notes
+  in paper_ideas.md.
+- Arm: Cameron is working on a 3D-printed mount for the SO-101 follower on the TurtleBot.
+- Next lab visit: first real-robot run of the web app (Cameron agreed).
