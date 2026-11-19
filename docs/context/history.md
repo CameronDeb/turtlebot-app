@@ -45,3 +45,13 @@
 - Mount research written up in arm_mount.md (TurtleBot 4 plate/standoff CAD, SO-101 base and reach from its URDF).
 - Bug caught by the new tests: a box in front of the object was taken as the object's distance (lidar), so the
   robot "arrived" at the box. Fixed: lidar only tightens the camera estimate when they agree within 0.3 m.
+
+## 2026-11-18 (later): Prof. Lee's reply
+- Paper: **one paper**. Find + fetch + 3DGS memory alone isn't new (GS-LTS, DynaMem, DREAM, MIF). Main contribution is
+  **revisit planning** (when/where to look again when the map may be out of date); fetching is the experiment. Arm
+  only if reliable by the **end of January 2027**. Draft `turtlebot-gs/paper/vsi_3dgs_draft.tex` reframed (new working
+  title "When to Look Again ..."), paper_ideas.md rewritten.
+- Mount rules: read the payload guide; low; existing M4 holes; don't block the camera; own 12 V ≥5 A battery; arm
+  moves only while the robot is stopped; removable with a few bolts and repeatable. arm_mount.md redesigned: bracket
+  on the front standoffs' existing M4 joints (spacer stack at the bottom, longer screws at the top), front-corner arm
+  outside the camera cone, removable arm plate located by two dowel pins (hole + slot).

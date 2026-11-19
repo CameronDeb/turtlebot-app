@@ -24,8 +24,10 @@ that laptop, with the helper scripts `so101_follower_gui.py`, `so101_poses.json`
 
 ## Plan
 - 2026-11-17: Cameron started a 3D-printed mount for the follower on the TurtleBot's top plate.
-- 2026-11-18: mount research in arm_mount.md. The arm can't reach the floor from the top plate; it has to hang low
-  in front (base bottom 0.10–0.15 m up), clamped to the two front Ø10 mm standoffs.
+- 2026-11-18: mount design in arm_mount.md, revised to Prof. Lee's rules: low (base bottom 0.08–0.12 m, the arm
+  can't reach the floor from the top plate), only the existing M4 joints of the two front standoffs, front corner so
+  the camera stays clear, own 12 V ≥5 A battery, arm moves only while the robot is stopped, removable arm plate on
+  dowel pins so it goes back in the same spot. The arm is in the paper only if it is reliable by the end of January.
 Once the web app's LLM layer can find objects and drive to them, **the follower arm gets mounted on the TurtleBot** for
 pickup.
 - Power: give the arm its own battery, not the TurtleBot's, because the robot's USB hub already browned out once.

@@ -18,9 +18,12 @@
 3. **SLAM + Nav2** (both installed on the robot) so Find can plan around obstacles and remember object locations.
 4. **LLM interpreter**: `COMMAND_INTERPRETER` class whose output is validated by `commands.validate` (it can now use
    `find`).
-5. **SO-101 mount**: measure the unknowns in arm_mount.md, mock up, print in PETG/ASA; then arm mask + new front edge
-   in the agent. Leader arm servo-ID fix still pending (so101_arm.md).
-6. **Paper**: "find, fetch, remember" draft; pick the main novelty (paper_ideas.md).
+5. **SO-101 mount** (Prof. Lee's rules, arm_mount.md): measure the unknowns, test print, then PETG/ASA; then the
+   arm/base interlock, footprint and lidar mask in the agent. **Arm decision: end of January 2027.** Leader arm
+   servo-ID fix still pending (so101_arm.md).
+6. **Paper** (decided 2026-11-18): one paper, main contribution = **revisit planning** (when and where to look again
+   when the map may be out of date), fetching = the experiment. Draft reframed; next: staleness terms in
+   `revisit_planner.py`, object memory, exact references for GS-LTS / DynaMem / DREAM / MIF (paper_ideas.md).
 
 ## Open questions
 - What the real undock does: back up only, or back up and turn?
