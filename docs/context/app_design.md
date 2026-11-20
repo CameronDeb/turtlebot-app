@@ -44,6 +44,11 @@
   `/hazard_detection` is **not republished to the Pi** on our robot (commented out in turtlebot4_bringup
   `republisher.yaml`; enabling it is a robot config change, ask Cameron). Forward is refused while the bumper is
   pressed. Added after Find drove into a chair's low sled base (below the 19 cm lidar plane) and pushed for 25 s.
+- **Agent 1.3/1.4 (2026-11-20)**: camera topics are subscribed only while pictures are taken (released after 30 s
+  idle; `GET /status?camera=1` warms them up), and a single-threaded rclpy executor: agent CPU 65% → 30% of a Pi core,
+  Pi load 3.7 → 1.8. Stall guard tightened to 0.8 s. Real-time obstacles: while driving, anything that appears in the
+  rest of the path (the move would now end closer than the margin) stops the robot 0.25 m before it (outcome
+  `obstacle`), and Find re-plans around it (up to 5 times); anything within 6 cm stops it at once.
 - **Route planning for Find (`pathplan.py`, 2026-11-20)**: the object's sighting becomes an odom position; each leg
   plans an A* route on a 5 cm grid from a fresh lidar scan (`GET /scan`), keep-out 0.30 m (gaps between legs
   narrower than ~0.6 m are closed, which keeps it from going under tables/chairs), extra cost inside 0.50 m; drive

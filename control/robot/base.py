@@ -99,6 +99,10 @@ class RobotClient:
         """Nearest lidar return (m from the robot centre) within +-width/2 of a bearing (+ = left), or None."""
         raise NotImplementedError
 
+    def warm_camera(self) -> None:
+        """Tell the robot pictures are coming, so it starts receiving camera frames (the agent only subscribes to
+        the camera while it is being used)."""
+
     def scan(self):
         """Current lidar returns for route planning: (pose, [(x, y), ...] in the odom frame)."""
         raise NotImplementedError

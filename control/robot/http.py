@@ -108,6 +108,9 @@ class HttpRobotClient(RobotClient):
         q = urllib.parse.urlencode({"bearing": f"{bearing_deg:.2f}", "width": f"{width_deg:.2f}"})
         return self._request("GET", f"/range?{q}", timeout=5.0).get("range")
 
+    def warm_camera(self):
+        self._request("GET", "/status?camera=1", timeout=3.0)
+
     def scan(self):
         d = self._request("GET", "/scan", timeout=5.0)
         pose = Pose.from_dict(d["pose"])

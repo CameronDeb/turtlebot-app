@@ -42,6 +42,9 @@ class SimRobotClient(RobotClient):
         self.obstacles = list(obstacles)  # (x, y) points the lidar sees
         self.objects = list(objects)  # (label, x, y) small objects on the floor the camera sees
         self.low_obstacles = list(low_obstacles)  # (x, y) points below the lidar: the robot gets stuck on them
+        # (x, y) points that only show up once the robot is moving (a person or chair moved into its way); the
+        # lidar watch stops the robot 0.25 m before one in its path, then it is an ordinary obstacle
+        self.appearing = []
         self._lock = threading.Lock()
         self._busy = threading.Lock()
         self._stop = threading.Event()
@@ -156,18 +159,28 @@ class SimRobotClient(RobotClient):
             def s():
                 if stuck:
                     return
+                if check_clear and self.appearing:
+                    self.obstacles.extend(self.appearing)
+                    self.appearing = []
+                if check_clear:
+                    gap, remaining = self.gap_ahead(), distance - step * done_steps[0]
+                    if gap < 0.06 or (gap - remaining < MARGIN - 0.03 and gap < 0.25):  # same rule as the agent
+                        stuck.append("obstacle")
+                        return
                 for ox, oy in self.low_obstacles:
                     ahead, side = self._local(ox, oy)
                     if abs(side) < PATH_HALF_WIDTH and 0 < ahead - BODY_FRONT < step:
-                        stuck.append(True)  # the bumper reaches it: stuck, like the real no-progress guard
+                        stuck.append("stalled")  # the bumper reaches it: stuck, like the real no-progress guard
                         return
                 self.docked = False
                 self.x += step * math.cos(self.yaw)
                 self.y += step * math.sin(self.yaw)
+                done_steps[0] += 1
 
+            done_steps = [0]
             done = self._animate(steps, s)
             if stuck:
-                return "stalled", None
+                return ("obstacle" if stuck[0] == "obstacle" else "stalled"), None
             return ("succeeded" if done else "canceled"), None
 
         return self._motion(fn, raw)

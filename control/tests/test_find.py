@@ -85,6 +85,16 @@ class FindTests(TestCase):
         for w in Trip.objects.get().waypoints.all():  # every stop along the way kept clear of the box
             self.assertGreater(math.hypot(w.x - 1.2, w.y), 0.29)
 
+    def test_reacts_to_something_appearing_in_the_way(self):
+        self.robot.objects = [("red mug", 3.0, 0.0)]
+        self.robot.appearing = [(1.0, y / 100) for y in range(-20, 21, 5)]  # someone steps in front
+        job = self.find("red mug")
+        self.assertEqual(job.state, Job.SUCCEEDED, job.message)
+        gap, _ = self.gap_to(3.0, 0.0)
+        self.assertAlmostEqual(gap, 0.30, delta=0.06)
+        for w in Trip.objects.get().waypoints.all():
+            self.assertGreater(min(math.hypot(w.x - 1.0, w.y - y / 100) for y in range(-20, 21, 5)), 0.17 + 0.05)
+
     def test_goes_round_a_table_instead_of_under_the_chairs(self):
         # Today's real run, as a test: the plant is behind a table with chairs; the lidar sees their legs ~0.45 m
         # apart (it can see the plant through the gaps), but not the chair bases on the floor between them.

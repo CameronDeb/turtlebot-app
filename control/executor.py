@@ -32,6 +32,7 @@ FIND_MAX_LEGS = 12
 FIND_CENTER_DEG = 2.5  # turn toward the object when it is further off-centre than this
 FIND_UNKNOWN_STEP = 0.30  # leg length when the distance can't be estimated
 FIND_NEAR = 0.9  # m: an object lost from view closer than this has gone below the camera's view
+FIND_MAX_DODGES = 5  # re-plans after something appears in the path
 
 
 # Motions stopped by the agent's guards (outcome -> what to tell the user)
@@ -195,7 +196,7 @@ def do_forward(ctx, p):
     raw = r.raw or {}
     done = f"Drove {moved:.2f} m" if moved is not None else "Drove forward"
     if r.outcome == "obstacle":
-        return f"{done}, then stopped: something came right up to the front of the robot."
+        return f"{done}, then stopped: something appeared in its path."
     if raw.get("shortened"):
         gap = raw.get("obstacle_gap")
         where = f" {gap:.2f} m ahead" if gap is not None else ""
@@ -345,6 +346,7 @@ def _wait_for_sensors(ctx, timeout=SENSOR_WAIT):
     end = time.monotonic() + timeout
     while True:
         ctx.check()
+        ctx.robot.warm_camera()
         s = ctx.robot.status()
         cams = s.get("camera") or {}
         cam_ok = any(age is not None and age < 1.0 for age in cams.values())
@@ -394,7 +396,7 @@ def do_find(ctx, p):
         raise RobotError(f"{seen}, but couldn't tell how far away it is{_ids(ctx)}")
     hfov = vision.horizontal_fov_deg(data)
     r_goal = standoff + BODY_FRONT
-    travelled, misses, legs, stuck = 0.0, 0, 0, 0
+    travelled, misses, legs, stuck, dodges = 0.0, 0, 0, 0, 0
     for _ in range(FIND_MAX_LEGS):
         ctx.check()
         pose, points = ctx.robot.scan()
@@ -426,9 +428,13 @@ def do_find(ctx, p):
             progress += moved
             budget -= moved
             if r.outcome == "obstacle":
-                raise RobotError(
-                    f"stopped after {travelled:.2f} m: something came right up to the front of the robot{_ids(ctx)}"
-                )
+                dodges += 1  # something appeared in the path: stopped short of it; re-plan around it
+                if dodges > FIND_MAX_DODGES:
+                    raise RobotError(
+                        f"kept finding new obstacles in the way to the {query}; stopped after {travelled:.2f} m"
+                        f"{_ids(ctx)}"
+                    )
+                break
             if (r.raw or {}).get("shortened") and moved < step - 0.03:
                 break  # the lidar sees something new on this leg: re-plan from a fresh scan
             if budget < 0.05:

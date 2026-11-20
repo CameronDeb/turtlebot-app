@@ -21,7 +21,8 @@ Endpoints (JSON; every request except GET /ping needs the header `X-Agent-Token:
 
 Obstacle handling for /drive with check_clear (the default): the move is shortened to stop `margin` before the
 nearest lidar return in the robot's path (it is refused only if there is no room at all), and the lidar keeps
-watching while the robot drives, cancelling the motion if something comes within STOP_GAP of the bumper.
+watching while the robot drives: if something appears in the rest of its path (the move would now end closer than
+`margin`), the robot stops DYN_STOP_DIST before it (outcome "obstacle"); anything within STOP_GAP stops it at once.
 
 Guards on every drive and rotate (always on, whatever check_clear says):
   - no progress: if the robot hasn't moved STALL_DIST (or turned STALL_ANGLE) in STALL_TIME while it should be
@@ -61,14 +62,14 @@ from irobot_create_msgs.msg import DockStatus, HazardDetectionVector, WheelStatu
 from irobot_create_msgs.srv import EStop
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
-from rclpy.executors import MultiThreadedExecutor
+from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
 from sensor_msgs.msg import BatteryState, Image, LaserScan
 
-VERSION = "1.2"
+VERSION = "1.4"
 
 # Motion limits (the web app uses smaller ones; these are the hard caps on the robot side).
 MAX_DRIVE_M = 5.0
@@ -84,8 +85,9 @@ BODY_FRONT = 0.17  # front bumper distance from base_link
 PATH_HALF_WIDTH = 0.21  # half width of the corridor the robot sweeps
 DEFAULT_MARGIN = 0.10  # stop this far before the nearest obstacle in the path
 STOP_GAP = 0.06  # while driving: cancel if anything is closer than this to the bumper
+DYN_STOP_DIST = 0.25  # while driving: stop this far from something that appeared in the path
 LOOK_AHEAD = 6.0  # how far ahead the path is checked (m)
-STALL_TIME = 1.5  # s without progress while moving -> stop
+STALL_TIME = 0.8  # s without progress while moving -> stop (at 0.15 m/s it normally covers 12 cm in that time)
 STALL_DIST = 0.02  # m
 STALL_ANGLE = 0.05  # rad (~3 deg)
 HAZARD_MAX_AGE = 0.5  # s
@@ -100,6 +102,9 @@ CAMERA_RGB = (
 CAMERA_DEPTH = "/oakd_rgbd/stereo/image_raw"  # depth aligned to that RGB, 16UC1 mm
 CAMERA_STOCK = "/oakd/rgb/preview/image_raw"  # stock bringup preview, 250x250, no depth
 PHOTO_WAIT = 4.0  # s to wait for a frame captured after the request
+# Camera topics are only subscribed while pictures are being taken: decoding 30 frames/s in Python cost ~60% of a
+# Pi core. They are released CAMERA_IDLE s after the last use (a Find keeps them alive between pictures).
+CAMERA_IDLE = 30.0
 # Pinhole intrinsics per topic (fx, fy, cx, cy); the robot publishes no camera_info for these.
 # Stock preview: 1080P sensor, ISP 1280x720 (HFOV ~69 deg), centre-cropped to 720x720 and scaled to 250x250.
 # Our RGB-D node: 640x360, from the calibration in turtlebot-gs/tools/bag_to_tum.py.
@@ -235,10 +240,13 @@ class RobotBridge(Node):
             for k, name in self.action_names.items()
         }
         self.estop = self.create_client(EStop, "/e_stop", callback_group=cb)
+        self._cb = cb
+        self._cam_lock = threading.Lock()
+        self._cam_subs = []
+        self._cam_since = None  # when the camera subscriptions were created
+        self._cam_used = 0.0
+        self.create_timer(2.0, self._release_camera, callback_group=cb)
         for topic, mtype in (
-            (CAMERA_RGB, Image),
-            (CAMERA_DEPTH, Image),
-            (CAMERA_STOCK, Image),
             ("/scan", LaserScan),
             ("/battery_state", BatteryState),
             ("/dock_status", DockStatus),
@@ -252,6 +260,31 @@ class RobotBridge(Node):
                 qos_profile_sensor_data,
                 callback_group=cb,
             )
+
+    def want_camera(self):
+        """Subscribe to the camera topics (if not already) and keep them for CAMERA_IDLE s."""
+        with self._cam_lock:
+            self._cam_used = time.monotonic()
+            if self._cam_subs:
+                return
+            for topic in (CAMERA_RGB, CAMERA_DEPTH, CAMERA_STOCK):
+                self._cam_subs.append(
+                    self.create_subscription(
+                        Image, topic, self._store(topic), qos_profile_sensor_data, callback_group=self._cb
+                    )
+                )
+            self._cam_since = time.monotonic()
+
+    def _release_camera(self):
+        with self._cam_lock:
+            if not self._cam_subs or time.monotonic() - self._cam_used < CAMERA_IDLE:
+                return
+            for sub in self._cam_subs:
+                self.destroy_subscription(sub)
+            self._cam_subs, self._cam_since = [], None
+        with self._data_lock:
+            for topic in (CAMERA_RGB, CAMERA_DEPTH, CAMERA_STOCK):
+                self._latest.pop(topic, None)
 
     def _store(self, topic):
         def cb(msg):
@@ -395,9 +428,10 @@ class RobotBridge(Node):
                 return name
         return None
 
-    def progress_watch(self, linear, check_gap=False, ignore_hazards=()):
-        """A watch() for run_motion: stops on hazards, on no progress, and (check_gap) on the lidar."""
-        state = {"t": time.monotonic(), "pose": None}
+    def progress_watch(self, linear, check_gap=False, ignore_hazards=(), planned=0.0, margin=DEFAULT_MARGIN):
+        """A watch() for run_motion: stops on hazards, on no progress, and (check_gap) on the lidar: on anything
+        within STOP_GAP, and on anything new in the rest of the path (planned m) once it is DYN_STOP_DIST away."""
+        state = {"t": time.monotonic(), "pose": None, "start": None}
 
         def watch():
             h = self.hazard(ignore_hazards)
@@ -410,6 +444,8 @@ class RobotBridge(Node):
                 pose = None
             if pose is not None:
                 ref = state["pose"]
+                if state["start"] is None:
+                    state["start"] = pose
                 if ref is None:
                     state["pose"], state["t"] = pose, now
                 else:
@@ -423,7 +459,13 @@ class RobotBridge(Node):
                         return "stalled"
             if check_gap:
                 try:
-                    if self.gap_ahead() < STOP_GAP:
+                    gap = self.gap_ahead()
+                    travelled = 0.0
+                    if pose is not None and state["start"] is not None:
+                        travelled = math.hypot(pose["x"] - state["start"]["x"], pose["y"] - state["start"]["y"])
+                    remaining = max(planned - travelled, 0.0)
+                    blocks_path = gap - remaining < margin - 0.03  # the move would now end too close to it
+                    if gap < STOP_GAP or (blocks_path and gap < DYN_STOP_DIST):
                         return "obstacle"
                 except AgentError:
                     pass  # a momentarily stale scan doesn't stop the robot; the other guards still do
@@ -562,8 +604,10 @@ class RobotBridge(Node):
     # ---- camera
 
     def photo(self):
+        self.want_camera()
         requested = time.monotonic()
         deadline = requested + PHOTO_WAIT
+        rgbd_running = self.count_publishers(CAMERA_RGB) > 0
         rgb = topic = None
         while time.monotonic() < deadline:
             msg, t = self.latest(CAMERA_RGB)
@@ -572,7 +616,9 @@ class RobotBridge(Node):
                 break
             stock, ts = self.latest(CAMERA_STOCK)
             rgbd_recent = t is not None and time.monotonic() - t < 2.0
-            if stock is not None and ts > requested and not rgbd_recent:
+            # right after subscribing, give our RGB-D node a moment before settling for the stock preview
+            settling = rgbd_running and time.monotonic() - (self._cam_since or 0.0) < 1.5
+            if stock is not None and ts > requested and not rgbd_recent and not settling:
                 rgb, topic = stock, CAMERA_STOCK
                 break
             time.sleep(0.03)
@@ -689,6 +735,8 @@ def make_handler(bridge, token):
                     raise AgentError(401, "missing or wrong X-Agent-Token")
                 route = (method, path)
                 if route == ("GET", "/status"):
+                    if "camera=1" in self.path:
+                        bridge.want_camera()  # the caller is about to take pictures: start receiving frames
                     return self.send_json(200, bridge.status())
                 if route == ("GET", "/photo"):
                     return self.send_json(200, bridge.photo())
@@ -767,7 +815,7 @@ def make_handler(bridge, token):
                         f"path blocked: obstacle {gap:.2f} m ahead of the bumper (no room to move forward)",
                     )
                 distance = min(distance, room)
-            watch = bridge.progress_watch(linear=True, check_gap=check)
+            watch = bridge.progress_watch(linear=True, check_gap=check, planned=distance, margin=margin)
             goal = DriveDistance.Goal(distance=distance, max_translation_speed=speed)
             outcome, _ = bridge.run_motion(
                 "drive", goal, timeout=distance / speed * 2.0 + 10.0, watch=watch
@@ -841,7 +889,9 @@ def main():
     # Own the signals: rclpy's default handlers would swallow SIGTERM/SIGINT and leave the HTTP server running.
     rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     bridge = RobotBridge()
-    executor = MultiThreadedExecutor(num_threads=4)
+    # One spin thread is enough: HTTP requests run in their own threads and only wait on futures and cached
+    # messages. (The multi-threaded executor cost ~40% of a Pi core just idling.)
+    executor = SingleThreadedExecutor()
     executor.add_node(bridge)
     spin = threading.Thread(target=executor.spin, daemon=True)
     spin.start()
