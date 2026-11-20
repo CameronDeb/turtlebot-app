@@ -107,6 +107,10 @@ class RobotClient:
         """Current lidar returns for route planning: (pose, [(x, y), ...] in the odom frame)."""
         raise NotImplementedError
 
+    def map_points(self):
+        """Obstacles from the robot's learned map near it, [(x, y), ...] in the odom frame ([] if no map yet)."""
+        return []
+
     def motors_on(self) -> dict:
         """Clear the base's e-stop. Returns {"ok", "wheels_enabled", "message"}."""
         raise NotImplementedError

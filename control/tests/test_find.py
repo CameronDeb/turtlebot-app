@@ -95,6 +95,16 @@ class FindTests(TestCase):
         for w in Trip.objects.get().waypoints.all():
             self.assertGreater(min(math.hypot(w.x - 1.0, w.y - y / 100) for y in range(-20, 21, 5)), 0.17 + 0.05)
 
+    def test_plans_around_what_it_learned_earlier(self):
+        # A wall the robot mapped on an earlier trip but can't see right now (e.g. hidden behind other things):
+        # the planner still goes round it.
+        self.robot.remembered = [(1.5, y / 100) for y in range(-60, 61, 5)]
+        self.robot.low_obstacles = [(1.5, y / 100) for y in range(-60, 61, 5)]  # driving into it would stall
+        self.robot.objects = [("red mug", 3.0, 0.0)]
+        job = self.find("red mug")
+        self.assertEqual(job.state, Job.SUCCEEDED, job.message)
+        self.assertIn("planned route", job.message)
+
     def test_goes_round_a_table_instead_of_under_the_chairs(self):
         # Today's real run, as a test: the plant is behind a table with chairs; the lidar sees their legs ~0.45 m
         # apart (it can see the plant through the gaps), but not the chair bases on the floor between them.

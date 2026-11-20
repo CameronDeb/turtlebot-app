@@ -400,6 +400,8 @@ def do_find(ctx, p):
     for _ in range(FIND_MAX_LEGS):
         ctx.check()
         pose, points = ctx.robot.scan()
+        # what the robot can see now, plus what it learned earlier (behind it, out of view, hidden by other things)
+        points = points + ctx.robot.map_points()
         route = pathplan.plan((pose.x, pose.y), goal, r_goal, points)
         if route is None:
             raise RobotError(

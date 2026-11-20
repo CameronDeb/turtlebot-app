@@ -126,6 +126,8 @@
     }
 
     $("estop").hidden = !(r.connected && r.wheels_enabled === false);
+    const m = r.mapping;
+    $("mapping").textContent = !r.connected ? "–" : !m ? "not available" : !m.enabled ? "off" : m.message;
     busy = !!state.job;
     document.querySelectorAll("button.cmd, #find-btn").forEach((b) => (b.disabled = busy || !r.connected));
     if (state.job) {

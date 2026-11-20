@@ -9,6 +9,7 @@ Endpoints (JSON; every request except GET /ping needs the header `X-Agent-Token:
   GET  /status                        pose (odom -> base_link), battery, dock, sensor ages, busy
   GET  /photo                         a fresh camera frame: base64 PNG (+ aligned 16-bit depth PNG when available)
   GET  /range?bearing=deg&width=deg  nearest lidar return within +-width/2 of a bearing (base_link, + = left)
+  GET  /map                           obstacles from the learned map (slam_toolbox), in the odom frame, near the robot
   GET  /scan                          current lidar returns (base_link, robot body removed, thinned to ~3 cm) and
                                       the robot pose at that moment, for route planning on the PC
   POST /drive   {"distance": m, "speed": m/s, "check_clear": bool, "margin": m}   forward only
@@ -31,6 +32,12 @@ Guards on every drive and rotate (always on, whatever check_clear says):
   - Create 3 hazards (bump, cliff, wheel drop, stall) cancel the motion (outcome "bumped" / "cliff" / ...). Only
     works if /hazard_detection is republished to the Pi (turtlebot4_bringup republisher.yaml; off by default).
 
+Learned map (AGENT_MAPPING=1, the default): the first time the agent sees the robot on its dock it starts
+slam_toolbox (online async, the TurtleBot 4's slam settings made lighter). If a saved map exists it is continued with
+the dock as its first pose, so every session adds to the same map. The map is saved to MAP_BASE when the robot docks,
+every SAVE_EVERY s while mapping, and when the agent stops (its first pose is always the dock, so saving anywhere is
+fine; only loading needs the robot on the dock).
+
 Motion endpoints return 200 with "outcome" = succeeded | canceled | aborted | obstacle | stalled | bumped | cliff |
 wheel_drop plus the pose before and after, so the caller can log what really happened even when a motion was stopped part-way. Errors that prevent a
 motion from starting (busy, blocked path, no lidar, motors off, bad input) return 4xx/5xx with
@@ -40,6 +47,7 @@ Run:  AGENT_TOKEN=<secret> ./run_agent.sh        (see README.md)
 """
 import argparse
 import base64
+import subprocess
 import hmac
 import json
 import math
@@ -60,16 +68,17 @@ from geometry_msgs.msg import TwistStamped
 from irobot_create_msgs.action import Dock, DriveDistance, RotateAngle, Undock
 from irobot_create_msgs.msg import DockStatus, HazardDetectionVector, WheelStatus
 from irobot_create_msgs.srv import EStop
+from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
-from rclpy.qos import qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
 from sensor_msgs.msg import BatteryState, Image, LaserScan
 
-VERSION = "1.4"
+VERSION = "1.5"
 
 # Motion limits (the web app uses smaller ones; these are the hard caps on the robot side).
 MAX_DRIVE_M = 5.0
@@ -112,6 +121,15 @@ INTRINSICS = {
     CAMERA_STOCK: (323.5, 323.5, 125.0, 125.0),
     CAMERA_RGB: (514.0, 514.0, 324.5, 180.0),
 }
+
+
+# Learned map
+MAP_DIR = os.path.expanduser("~/robot_agent/maps")
+MAP_BASE = os.path.join(MAP_DIR, "lab")  # slam_toolbox writes lab.posegraph + lab.data
+TB4_SLAM_PARAMS = "/opt/ros/jazzy/share/turtlebot4_navigation/config/slam.yaml"
+SAVE_EVERY = 120.0  # s
+MAP_RADIUS = 8.0  # m: /map only returns obstacles this close to the robot
+MAP_OCCUPIED = 65  # occupancy value (0-100) counted as an obstacle
 
 
 class AgentError(Exception):
@@ -246,6 +264,10 @@ class RobotBridge(Node):
         self._cam_since = None  # when the camera subscriptions were created
         self._cam_used = 0.0
         self.create_timer(2.0, self._release_camera, callback_group=cb)
+        map_qos = QoSProfile(
+            depth=1, reliability=ReliabilityPolicy.RELIABLE, durability=DurabilityPolicy.TRANSIENT_LOCAL
+        )
+        self.create_subscription(OccupancyGrid, "/map", self._store("/map"), map_qos, callback_group=cb)
         for topic, mtype in (
             ("/scan", LaserScan),
             ("/battery_state", BatteryState),
@@ -345,6 +367,7 @@ class RobotBridge(Node):
                 "stock_age": self.age(CAMERA_STOCK),
             },
             "busy": self._motion_lock.locked(),
+            "mapping": self.mapper.status() if getattr(self, "mapper", None) else None,
             "active": self._active_name,
             "actions_ready": {k: c.server_is_ready() for k, c in self.actions.items()},
         }
@@ -395,6 +418,29 @@ class RobotBridge(Node):
         if not in_path.any():
             return math.inf
         return max(float(bx[in_path].min()) - BODY_FRONT, 0.0)
+
+    def map_obstacles(self):
+        """Occupied cells of the learned map within MAP_RADIUS of the robot, in the odom frame."""
+        grid, t = self.latest("/map")
+        if grid is None:
+            return {"ok": True, "available": False, "points": []}
+        try:
+            tf = self.tf_buffer.lookup_transform("odom", grid.header.frame_id or "map", Time())
+        except tf2_ros.TransformException as e:
+            return {"ok": True, "available": False, "points": [], "error": e.__class__.__name__}
+        pose = self.pose()
+        info = grid.info
+        data = np.asarray(grid.data, dtype=np.int16).reshape(info.height, info.width)
+        rows, cols = np.nonzero(data >= MAP_OCCUPIED)
+        res = info.resolution
+        gx = info.origin.position.x + (cols + 0.5) * res
+        gy = info.origin.position.y + (rows + 0.5) * res
+        tx, ty, tyaw = tf.transform.translation.x, tf.transform.translation.y, yaw_of(tf.transform.rotation)
+        ox = tx + math.cos(tyaw) * gx - math.sin(tyaw) * gy
+        oy = ty + math.sin(tyaw) * gx + math.cos(tyaw) * gy
+        near = np.hypot(ox - pose["x"], oy - pose["y"]) <= MAP_RADIUS
+        pts = np.round(np.stack([ox[near], oy[near]], axis=1), 3).tolist()
+        return {"ok": True, "available": True, "points": pts, "age": round(time.monotonic() - t, 1)}
 
     def scan_for_planning(self, cell=0.03):
         bx, by = self.scan_points()
@@ -665,6 +711,136 @@ class RobotBridge(Node):
         return out
 
 
+class Mapper:
+    """Runs slam_toolbox while the agent runs, anchored at the dock, and saves the map (see the module doc)."""
+
+    def __init__(self, bridge, enabled):
+        from slam_toolbox.srv import SerializePoseGraph
+
+        self.bridge, self.enabled = bridge, enabled
+        self.srv_type = SerializePoseGraph
+        self.save_client = bridge.create_client(SerializePoseGraph, "/slam_toolbox/serialize_map")
+        self.proc = None
+        self.loaded = False
+        self.message = "off" if not enabled else "waiting for the robot to be on its dock"
+        self.last_docked = None
+        self.last_save = 0.0
+        self.lock = threading.Lock()
+        self._stop = threading.Event()
+        threading.Thread(target=self._loop, daemon=True).start()
+
+    def status(self):
+        return {
+            "enabled": self.enabled,
+            "running": self.proc is not None and self.proc.poll() is None,
+            "continued_saved_map": self.loaded,
+            "message": self.message,
+            "saved": os.path.exists(MAP_BASE + ".posegraph"),
+        }
+
+    def _docked(self):
+        dock, t = self.bridge.latest("/dock_status")
+        if dock is None or time.monotonic() - t > 5.0:
+            return None
+        return bool(dock.is_docked)
+
+    def _loop(self):
+        while not self._stop.wait(2.0):
+            if not self.enabled:
+                continue
+            try:
+                self._tick()
+            except Exception as e:  # never let mapping take the agent down
+                self.message = f"mapping error: {e!r}"
+                print("mapper:", repr(e), flush=True)
+
+    def _tick(self):
+        docked = self._docked()
+        running = self.proc is not None and self.proc.poll() is None
+        if self.proc is not None and not running:
+            self.message = f"slam_toolbox exited (code {self.proc.returncode}); restarts next time on the dock"
+            self.proc = None
+        if self.proc is None:
+            if docked:
+                self._start()
+        else:
+            if self.last_docked is False and docked is True:
+                self.save("docked")
+            elif time.monotonic() - self.last_save > SAVE_EVERY:
+                self.save("periodic")
+        self.last_docked = docked
+
+    def _start(self):
+        import yaml
+
+        os.makedirs(MAP_DIR, exist_ok=True)
+        # a slam_toolbox left over from an agent that was killed hard would fight this one for the map frame
+        subprocess.run(["pkill", "-f", "[a]sync_slam_toolbox_node"], check=False)
+        subprocess.run(["pkill", "-f", "[s]lam_params_file:=" + MAP_DIR], check=False)
+        time.sleep(1.0)
+        with open(TB4_SLAM_PARAMS) as f:
+            params = yaml.safe_load(f)
+        p = params["slam_toolbox"]["ros__parameters"]
+        p.update(
+            {
+                "use_sim_time": False,
+                "mode": "mapping",
+                "enable_interactive_mode": False,
+                "transform_publish_period": 0.05,
+                "map_update_interval": 2.0,
+                "minimum_time_interval": 0.5,
+            }
+        )
+        self.loaded = os.path.exists(MAP_BASE + ".posegraph")
+        if self.loaded:
+            p["map_file_name"] = MAP_BASE
+            p["map_start_at_dock"] = True
+        path = os.path.join(MAP_DIR, "slam_params.yaml")
+        with open(path, "w") as f:
+            yaml.safe_dump(params, f)
+        log = open(os.path.join(MAP_DIR, "slam.log"), "ab")
+        self.proc = subprocess.Popen(
+            ["ros2", "launch", "slam_toolbox", "online_async_launch.py",
+             f"slam_params_file:={path}", "use_sim_time:=false"],
+            stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, start_new_session=True,
+        )
+        self.last_save = time.monotonic()
+        self.message = "learning (continuing the saved map)" if self.loaded else "learning (new map)"
+        print(f"mapper: started slam_toolbox, pid {self.proc.pid}, loaded={self.loaded}", flush=True)
+
+    def save(self, why):
+        with self.lock:
+            if self.proc is None or self.proc.poll() is not None:
+                return False
+            self.last_save = time.monotonic()
+            if self.bridge.latest("/map")[0] is None:
+                return False  # nothing mapped yet (the lidar is off on the dock): don't save an empty map
+            if not self.save_client.wait_for_service(timeout_sec=2.0):
+                self.message = "learning (save service not ready yet)"
+                return False
+            fut = self.save_client.call_async(self.srv_type.Request(filename=MAP_BASE))
+            if not wait_future(fut, 30.0) or fut.result().result != 0:
+                self.message = "learning (last save FAILED)"
+                print(f"mapper: save ({why}) failed", flush=True)
+                return False
+            self.message = f"learning; saved ({why}) at {time.strftime('%H:%M:%S')}"
+            print(f"mapper: saved map ({why})", flush=True)
+            return True
+
+    def shutdown(self):
+        self._stop.set()
+        if self.proc is not None and self.proc.poll() is None:
+            self.save("agent stopping")
+            try:
+                os.killpg(self.proc.pid, signal.SIGINT)
+                self.proc.wait(timeout=10)
+            except Exception:
+                try:
+                    os.killpg(self.proc.pid, signal.SIGKILL)
+                except Exception:
+                    pass
+
+
 def wait_future(future, timeout):
     end = time.monotonic() + timeout
     while not future.done():
@@ -752,6 +928,8 @@ def make_handler(bridge, token):
                     return self.send_json(
                         200, {"ok": True, "range": bridge.range_at(bearing, width)}
                     )
+                if route == ("GET", "/map"):
+                    return self.send_json(200, bridge.map_obstacles())
                 if route == ("GET", "/scan"):
                     return self.send_json(200, bridge.scan_for_planning())
                 if route == ("POST", "/motors"):
@@ -896,6 +1074,7 @@ def main():
     spin = threading.Thread(target=executor.spin, daemon=True)
     spin.start()
 
+    bridge.mapper = Mapper(bridge, os.environ.get("AGENT_MAPPING", "1") == "1")
     server = ThreadingHTTPServer((args.bind, args.port), make_handler(bridge, token))
     server.daemon_threads = True
 
@@ -911,6 +1090,7 @@ def main():
         server.serve_forever()
     finally:
         bridge.stop()
+        bridge.mapper.shutdown()
         server.server_close()
         executor.shutdown()
         bridge.destroy_node()

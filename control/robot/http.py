@@ -57,6 +57,7 @@ class HttpRobotClient(RobotClient):
             "docked": d.get("docked"),
             "dock_visible": d.get("dock_visible"),
             "wheels_enabled": d.get("wheels_enabled"),
+            "mapping": d.get("mapping"),
             "busy": d.get("busy", False),
             "active": d.get("active"),
             "scan_age": d.get("scan_age"),
@@ -117,6 +118,13 @@ class HttpRobotClient(RobotClient):
         c, s = math.cos(pose.yaw), math.sin(pose.yaw)
         pts = [(pose.x + c * x - s * y, pose.y + s * x + c * y) for x, y in d.get("points", [])]
         return pose, pts
+
+    def map_points(self):
+        try:
+            d = self._request("GET", "/map", timeout=5.0)
+        except RobotError:
+            return []  # an agent without mapping, or no map yet: plan from the live scan alone
+        return [tuple(p) for p in d.get("points", [])]
 
     def motors_on(self):
         return self._request("POST", "/motors", {"enabled": True}, timeout=15.0)

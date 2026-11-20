@@ -45,6 +45,7 @@ class SimRobotClient(RobotClient):
         # (x, y) points that only show up once the robot is moving (a person or chair moved into its way); the
         # lidar watch stops the robot 0.25 m before one in its path, then it is an ordinary obstacle
         self.appearing = []
+        self.remembered = []  # (x, y) obstacles in the learned map that the live scan can't see right now
         self._lock = threading.Lock()
         self._busy = threading.Lock()
         self._stop = threading.Event()
@@ -244,6 +245,9 @@ class SimRobotClient(RobotClient):
             pose = self._pose()
             pts = [(x, y) for x, y in self.obstacles if math.hypot(x - self.x, y - self.y) < 8.0]
         return pose, pts
+
+    def map_points(self):
+        return list(self.remembered)
 
     def range_at(self, bearing_deg, width_deg=6.0):
         with self._lock:

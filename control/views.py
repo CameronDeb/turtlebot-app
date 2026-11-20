@@ -130,6 +130,7 @@ def api_state(request):
             "docked": s.get("docked"),
             "dock_visible": s.get("dock_visible"),
             "wheels_enabled": s.get("wheels_enabled"),
+            "mapping": s.get("mapping"),
             "busy": s.get("busy"),
             "scan_age": s.get("scan_age"),
             "camera": s.get("camera", {}),

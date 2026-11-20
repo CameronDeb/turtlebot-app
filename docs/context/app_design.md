@@ -49,6 +49,12 @@
   Pi load 3.7 → 1.8. Stall guard tightened to 0.8 s. Real-time obstacles: while driving, anything that appears in the
   rest of the path (the move would now end closer than the margin) stops the robot 0.25 m before it (outcome
   `obstacle`), and Find re-plans around it (up to 5 times); anything within 6 cm stops it at once.
+- **Learned map (agent 1.5, 2026-11-20)**: the agent runs slam_toolbox (online async, the TurtleBot's slam.yaml made
+  lighter) whenever it first sees the robot on its dock; a saved map is continued with `map_start_at_dock`, so each
+  session adds to the same map (the first pose is where the lidar first scans after undocking; scan matching corrects
+  small differences). Saved on docking, every 2 min (once there is a map) and when the agent stops.
+  `GET /map` returns occupied cells near the robot converted to odom, and Find plans on live scan + learned map. The
+  GUI shows the map state. Cameron asked for this instead of a separate manual mapping session.
 - **Route planning for Find (`pathplan.py`, 2026-11-20)**: the object's sighting becomes an odom position; each leg
   plans an A* route on a 5 cm grid from a fresh lidar scan (`GET /scan`), keep-out 0.30 m (gaps between legs
   narrower than ~0.6 m are closed, which keeps it from going under tables/chairs), extra cost inside 0.50 m; drive
