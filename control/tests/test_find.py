@@ -126,16 +126,28 @@ class FindTests(TestCase):
         self.assertIn("no clear way", job.message)
         self.assertAlmostEqual(math.hypot(self.robot.x, self.robot.y), 0.0, places=6)
 
-    def test_low_obstacle_stops_find_instead_of_ramming(self):
+    def test_gets_stuck_once_then_goes_round_and_never_back(self):
         # Today's real run: the plant was seen through a gap under chairs whose low bases the lidar can't see.
         self.robot.objects = [("potted plant", 3.0, 0.0)]
-        self.robot.low_obstacles = [(1.0, 0.0)]  # chair base on the floor
+        self.robot.low_obstacles = [(1.0, y / 100) for y in range(-25, 26, 5)]  # chair base on the floor
+        stalls = []
+        drive = self.robot.drive
+
+        def counting_drive(distance, check_clear=True):
+            r = drive(distance, check_clear)
+            if r.outcome == "stalled":
+                stalls.append((round(self.robot.x, 2), round(self.robot.y, 2)))
+            return r
+
+        self.robot.drive = counting_drive
         job = self.find("potted plant")
-        self.assertEqual(job.state, Job.FAILED)
-        self.assertIn("stopped making progress", job.message)
-        self.assertLess(self.robot.x, 1.0 - 0.17 + 0.01)  # stopped at the bar, not through it
-        self.assertEqual(executor.submit("return_home", {}).state, Job.SUCCEEDED)  # and can still get back
-        self.assertAlmostEqual(math.hypot(self.robot.x, self.robot.y), 0.0, places=2)
+        self.assertEqual(job.state, Job.SUCCEEDED, job.message)
+        self.assertEqual(len(stalls), 1, stalls)  # stuck once, then planned around that spot: never back into it
+        gap, _ = self.gap_to(3.0, 0.0)
+        self.assertAlmostEqual(gap, 0.30, delta=0.06)
+        back = executor.submit("return_home", {})
+        self.assertEqual(back.state, Job.SUCCEEDED, back.message)  # and gets back without the stuck spot
+        self.assertEqual(len(stalls), 1, stalls)
 
     def test_tall_object_seen_by_lidar(self):
         self.robot.objects = [("trash can", 2.0, 0.0)]
@@ -168,7 +180,7 @@ class FindParsingTests(SimpleTestCase):
     def test_validate(self):
         self.assertEqual(
             validate("find", {"object": "  The RED mug!! "}),
-            {"object": "red mug", "approach": True, "standoff": 0.3, "max_range": 4.0},
+            {"object": "red mug", "approach": True, "standoff": 0.3, "max_range": 25.0},
         )
         for bad in ({}, {"object": ""}, {"object": "!!"}, {"object": 3}, {"object": "x", "standoff": 5}):
             with self.assertRaises(CommandError):

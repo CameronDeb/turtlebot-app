@@ -28,11 +28,14 @@ MAX_TRIES_PER_TARGET = 4
 # Object search
 BODY_FRONT = 0.17  # bumper distance from the robot centre (m)
 FIND_MAX_LEG = 1.0  # drive at most this far before looking again
-FIND_MAX_LEGS = 12
+FIND_MAX_LEGS = 40  # backstop; the real limit is FIND_NO_PROGRESS
 FIND_CENTER_DEG = 2.5  # turn toward the object when it is further off-centre than this
 FIND_UNKNOWN_STEP = 0.30  # leg length when the distance can't be estimated
 FIND_NEAR = 0.9  # m: an object lost from view closer than this has gone below the camera's view
-FIND_MAX_DODGES = 5  # re-plans after something appears in the path
+FIND_MAX_DODGES = 8  # re-plans after something appears in the path
+FIND_NO_PROGRESS = 4  # legs in a row without getting FIND_PROGRESS closer to the object -> give up
+FIND_PROGRESS = 0.15  # m
+NO_GO_RADIUS = 0.12  # m: a spot where the robot got blocked is planned around as if it were an obstacle this big
 
 
 # Motions stopped by the agent's guards (outcome -> what to tell the user)
@@ -65,6 +68,7 @@ class JobContext:
         self.robot = robot
         self.cancel = cancel
         self.result = {}
+        self.stuck_spots = []  # places the robot got stuck this job: never retraced by Return
 
     def check(self):
         if self.cancel.is_set():
@@ -112,11 +116,15 @@ class JobContext:
                 "the robot's pose after the move is unknown, so return-to-start can't use this trip; "
                 "check the robot's odometry (TF odom -> base_link)"
             )
+        stuck_here = kind == Waypoint.MOVE and any(
+            math.hypot(pose.x - x, pose.y - y) < r for x, y, r in self.stuck_spots
+        )
         with transaction.atomic():
             last = trip.waypoints.aggregate(m=Max("seq"))["m"]
             Waypoint.objects.create(
                 trip=trip,
                 seq=0 if last is None else last + 1,
+                retraced=stuck_here,
                 kind=kind,
                 x=pose.x,
                 y=pose.y,
@@ -125,11 +133,11 @@ class JobContext:
             )
 
     @staticmethod
-    def _finish_motion(result, what):
+    def _finish_motion(result, what, allow=()):
         if result.outcome == "canceled":
             raise Canceled()
-        if result.outcome == "obstacle":
-            return  # stopped by the lidar watch: the caller decides what that means
+        if result.outcome == "obstacle" or result.outcome in allow:
+            return  # stopped by the lidar watch (or an allowed guard): the caller decides what that means
         if result.outcome in GUARD_STOPS:
             moved = _moved(result)
             after = f" after {moved:.2f} m" if moved is not None and moved >= 0.01 else ""
@@ -139,19 +147,30 @@ class JobContext:
 
     # ---- primitives
 
-    def _motion(self, call, what, record):
+    def _motion(self, call, what, record, allow=()):
         self.check()
         start_info = self._trip_start_info() if record else None
         result = call()
         if record:
             self.record(self._trip_for(start_info, result), result.pose_after)
-        self._finish_motion(result, what)
+        self._finish_motion(result, what, allow)
         return result
 
-    def drive(self, distance, check_clear=True, record=True):
+    def drive(self, distance, check_clear=True, record=True, allow=()):
         return self._motion(
-            lambda: self.robot.drive(distance, check_clear=check_clear), f"driving {distance:.2f} m", record
+            lambda: self.robot.drive(distance, check_clear=check_clear), f"driving {distance:.2f} m", record, allow
         )
+
+    def forget_spot(self, xy, radius=0.3):
+        """Drop recorded waypoints near a spot where the robot got stuck, so Return doesn't drive back into it."""
+        self.stuck_spots.append((xy[0], xy[1], radius))
+        trip = active_trip()
+        if trip is None:
+            return
+        for w in trip.waypoints.filter(kind=Waypoint.MOVE, retraced=False):
+            if math.hypot(w.x - xy[0], w.y - xy[1]) < radius:
+                w.retraced = True
+                w.save(update_fields=["retraced"])
 
     def rotate(self, degrees, record=True):
         return self._motion(lambda: self.robot.rotate(degrees), f"turning {degrees:.0f}°", record)
@@ -390,63 +409,108 @@ def do_find(ctx, p):
         far = f", about {target['distance']:.1f} m away" if target["distance"] else ""
         return f"{seen}{far}, and turned to face it."
 
-    # 2. Approach along a route planned around what the lidar sees, re-planned after every leg.
+    # 2. Approach along a planned route. It keeps following a route while it stays clear, remembers every spot
+    # where it got blocked (and plans around those from then on), and gives up only when it stops getting closer.
     goal = _to_odom(target, data.pose or ctx.robot.pose())
     if goal is None:
         raise RobotError(f"{seen}, but couldn't tell how far away it is{_ids(ctx)}")
     hfov = vision.horizontal_fov_deg(data)
     r_goal = standoff + BODY_FRONT
-    travelled, misses, legs, stuck, dodges = 0.0, 0, 0, 0, 0
+    travelled, misses, legs, dodges, stalls = 0.0, 0, 0, 0, 0
+    no_go = []  # (x, y) spots where the robot got blocked: planned around for the rest of this search
+    route, route_goal = None, None
+    best = math.inf  # closest it has been to the object
+    no_progress = 0
     for _ in range(FIND_MAX_LEGS):
         ctx.check()
         pose, points = ctx.robot.scan()
-        # what the robot can see now, plus what it learned earlier (behind it, out of view, hidden by other things)
-        points = points + ctx.robot.map_points()
-        route = pathplan.plan((pose.x, pose.y), goal, r_goal, points)
-        if route is None:
-            raise RobotError(
-                f"{seen}, but there's no clear way to it: furniture, or gaps narrower than about 0.6 m, are in the "
-                f"way{_ids(ctx)}"
-            )
+        # what the robot sees now + what it learned earlier + where it got blocked
+        points = points + ctx.robot.map_points() + _no_go_points(no_go)
+        start_xy = (pose.x, pose.y)
+        keep = (
+            route
+            and route_goal is not None
+            and math.dist(route_goal, goal) < 0.3
+            and pathplan.still_clear(start_xy, route, points)
+        )
+        if not keep:
+            route = pathplan.plan(start_xy, goal, r_goal, points)
+            route_goal = goal
+            if route is None:
+                raise RobotError(
+                    f"{seen}, but there's no clear way to it: furniture, gaps narrower than about 0.6 m, or places "
+                    f"it already got stuck are in the way{_ids(ctx)}"
+                )
         if not route:
             break
         budget = min(FIND_MAX_LEG, p["max_range"] - travelled)
         if budget < 0.05:
             raise RobotError(f"drove {travelled:.2f} m (the search limit) without reaching the {query}{_ids(ctx)}")
         legs += 1
-        progress = 0.0
-        for wx, wy in route:
+        arrived = False
+        while route and budget >= 0.05:
+            wx, wy = route[0]
             pose = ctx.robot.pose()
             turn = planner.wrap(math.atan2(wy - pose.y, wx - pose.x) - pose.yaw)
             if abs(math.degrees(turn)) > 3.0:
                 ctx.rotate(math.degrees(turn))
-            step = min(math.hypot(wx - pose.x, wy - pose.y), budget)
+            remaining = math.hypot(wx - pose.x, wy - pose.y)
+            step = min(remaining, budget)
             if step < 0.03:
+                route.pop(0)
                 continue
-            r = ctx.drive(step, check_clear=True)  # guard stops (stalled, bumped, ...) raise RobotError
+            r = ctx.drive(step, check_clear=True, allow=("stalled",))
             moved = _moved(r)
             moved = step if moved is None else moved
             travelled += moved
-            progress += moved
             budget -= moved
-            if r.outcome == "obstacle":
+            raw = r.raw or {}
+            blocked_at = None
+            if r.outcome == "stalled":
+                stalls += 1  # pushing against something the lidar can't see: mark it, back away, plan around it
+                if stalls > 3:
+                    raise RobotError(f"got stuck {stalls} times on the way to the {query}{_ids(ctx)}")
+                blocked_at = _ahead(r.pose_after or ctx.robot.pose(), BODY_FRONT + 0.05)
+            elif r.outcome == "obstacle":
                 dodges += 1  # something appeared in the path: stopped short of it; re-plan around it
                 if dodges > FIND_MAX_DODGES:
                     raise RobotError(
                         f"kept finding new obstacles in the way to the {query}; stopped after {travelled:.2f} m"
                         f"{_ids(ctx)}"
                     )
+            elif raw.get("shortened") and moved < step - 0.03:
+                gap = raw.get("obstacle_gap")
+                # it stopped 0.10 m short of what the lidar saw in the path
+                blocked_at = _ahead(r.pose_after or ctx.robot.pose(), BODY_FRONT + 0.10)
+            if blocked_at is not None and math.dist(blocked_at, goal) < r_goal + 0.3:
+                arrived = True  # that's the object itself, seen by the lidar: as close as it safely gets
                 break
-            if (r.raw or {}).get("shortened") and moved < step - 0.03:
-                break  # the lidar sees something new on this leg: re-plan from a fresh scan
-            if budget < 0.05:
+            if blocked_at is not None:
+                no_go.append(blocked_at)
+            if r.outcome != "succeeded" or blocked_at is not None:
+                route = None  # re-plan from a fresh scan, around the new no-go spot
+                if r.outcome == "stalled":
+                    ctx.rotate(180.0)  # turn away from what it is stuck on (it can't see it to drive round it)
+                    stuck_pose = ctx.robot.pose()
+                    ctx.forget_spot((stuck_pose.x, stuck_pose.y))
                 break
-        stuck = stuck + 1 if progress < 0.05 else 0
-        if stuck >= 2:
-            raise RobotError(f"can't get past an obstacle on the way to the {query}{_ids(ctx)}")
-        # Look again when the object should be visible (not when it's already below the camera's view).
+            if step >= remaining - 0.03:
+                route.pop(0)
+        if arrived:
+            break
+        # Progress: closer to the object than ever before?
         pose = ctx.robot.pose()
         dist = math.hypot(goal[0] - pose.x, goal[1] - pose.y)
+        if dist < best - FIND_PROGRESS:
+            best, no_progress = dist, 0
+        else:
+            no_progress += 1
+            if no_progress >= FIND_NO_PROGRESS:
+                raise RobotError(
+                    f"stopped making progress toward the {query} ({dist - BODY_FRONT:.1f} m away after "
+                    f"{travelled:.1f} m of driving); it may be boxed in by furniture{_ids(ctx)}"
+                )
+        # Look again when the object should be visible (not when it's already below the camera's view).
         if dist - BODY_FRONT > FIND_NEAR:
             bearing = math.degrees(planner.wrap(math.atan2(goal[1] - pose.y, goal[0] - pose.x) - pose.yaw))
             if abs(bearing) > hfov * 0.35:
@@ -460,7 +524,7 @@ def do_find(ctx, p):
                     goal = new_goal
             else:
                 misses += 1  # hidden behind something on the way round: keep going to where it was seen
-                if misses >= 4:
+                if misses >= 6:
                     raise RobotError(f"lost sight of the {query} after driving {travelled:.2f} m{_ids(ctx)}")
     else:
         raise RobotError(f"didn't reach the {query} after {FIND_MAX_LEGS} legs ({travelled:.2f} m){_ids(ctx)}")
@@ -473,13 +537,32 @@ def do_find(ctx, p):
     pose = ctx.robot.pose()
     extra = math.hypot(goal[0] - pose.x, goal[1] - pose.y) - BODY_FRONT - standoff
     if extra > 0.04:  # the route ends on a 5 cm grid: close the last few centimetres straight in
-        r = ctx.drive(min(extra, 0.3), check_clear=True)
-        travelled += _moved(r) or 0.0
+        try:
+            r = ctx.drive(min(extra, 0.3), check_clear=True, allow=("stalled",))
+            travelled += _moved(r) or 0.0
+        except RobotError:
+            pass  # no room (the lidar sees the object itself): this is as close as it gets
     ctx.photo()
     pose = ctx.robot.pose()
     gap = max(math.hypot(goal[0] - pose.x, goal[1] - pose.y) - BODY_FRONT, 0.0)
     how = "" if legs <= 1 else f" along a planned route ({legs} legs)"
     return f"{seen}. Drove {travelled:.2f} m{how} and stopped about {gap:.2f} m in front of it{_ids(ctx)}."
+
+
+def _ahead(pose, d):
+    return pose.x + d * math.cos(pose.yaw), pose.y + d * math.sin(pose.yaw)
+
+
+def _no_go_points(spots):
+    """Each no-go spot as a small ring of points, so the planner's keep-out closes it off."""
+    pts = []
+    for x, y in spots:
+        pts.append((x, y))
+        pts.extend(
+            (x + NO_GO_RADIUS * math.cos(a * math.pi / 4), y + NO_GO_RADIUS * math.sin(a * math.pi / 4))
+            for a in range(8)
+        )
+    return pts
 
 
 def _to_odom(det, pose):

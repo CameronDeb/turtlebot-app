@@ -8,7 +8,7 @@ MIN_FORWARD_M = 0.05
 MAX_TURN_DEG = 360.0
 MAX_SEQUENCE = 20
 FIND_STANDOFF_M = (0.10, 1.0, 0.30)  # min, max, default gap left between the bumper and the object
-FIND_MAX_RANGE_M = (0.5, 8.0, 4.0)  # how far the search will drive in total
+FIND_MAX_RANGE_M = (0.5, 50.0, 25.0)  # backstop on total driving; the real stop is "no progress" (executor)
 
 KINDS = {
     "forward": "Drive forward",

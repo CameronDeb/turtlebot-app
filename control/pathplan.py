@@ -162,6 +162,26 @@ def _shorten(g, pts, passable):
     return out
 
 
+def still_clear(start, waypoints, points):
+    """Is an existing route still outside the keep-out zone, given new points? (keeps the robot from switching
+    routes every leg when nothing is in the way)"""
+    if not waypoints:
+        return False
+    g = build_grid(start, waypoints[-1], points)
+    if g is None:
+        return False
+
+    def passable(i, j):
+        return g.free(i, j) or (g.inside(i, j) and math.dist(g.centre(i, j), start) <= START_ESCAPE)
+
+    prev = start
+    for w in waypoints:
+        if not _line_ok(g, prev, w, passable):
+            return False
+        prev = w
+    return True
+
+
 def path_length(start, waypoints):
     total, prev = 0.0, start
     for w in waypoints:

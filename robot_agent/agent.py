@@ -10,6 +10,8 @@ Endpoints (JSON; every request except GET /ping needs the header `X-Agent-Token:
   GET  /photo                         a fresh camera frame: base64 PNG (+ aligned 16-bit depth PNG when available)
   GET  /range?bearing=deg&width=deg  nearest lidar return within +-width/2 of a bearing (base_link, + = left)
   GET  /map                           obstacles from the learned map (slam_toolbox), in the odom frame, near the robot
+  GET  /map_grid                      the whole learned map for exploration: zlib+base64 bytes (0 free, 100 occupied,
+                                      255 unknown), row-major from the origin, plus the map -> odom transform
   GET  /scan                          current lidar returns (base_link, robot body removed, thinned to ~3 cm) and
                                       the robot pose at that moment, for route planning on the PC
   POST /drive   {"distance": m, "speed": m/s, "check_clear": bool, "margin": m}   forward only
@@ -68,6 +70,7 @@ from geometry_msgs.msg import TwistStamped
 from irobot_create_msgs.action import Dock, DriveDistance, RotateAngle, Undock
 from irobot_create_msgs.msg import DockStatus, HazardDetectionVector, WheelStatus
 from irobot_create_msgs.srv import EStop
+from std_srvs.srv import Trigger
 from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -78,7 +81,7 @@ from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
 from sensor_msgs.msg import BatteryState, Image, LaserScan
 
-VERSION = "1.5"
+VERSION = "1.7"
 
 # Motion limits (the web app uses smaller ones; these are the hard caps on the robot side).
 MAX_DRIVE_M = 5.0
@@ -258,6 +261,10 @@ class RobotBridge(Node):
             for k, name in self.action_names.items()
         }
         self.estop = self.create_client(EStop, "/e_stop", callback_group=cb)
+        # The OAK-D sometimes drops off USB while the motors draw current and comes back unbooted; the stock
+        # driver then hangs. Its own stop/start services bring it back.
+        self.cam_stop = self.create_client(Trigger, "/oakd/stop_camera", callback_group=cb)
+        self.cam_start = self.create_client(Trigger, "/oakd/start_camera", callback_group=cb)
         self._cb = cb
         self._cam_lock = threading.Lock()
         self._cam_subs = []
@@ -441,6 +448,29 @@ class RobotBridge(Node):
         near = np.hypot(ox - pose["x"], oy - pose["y"]) <= MAP_RADIUS
         pts = np.round(np.stack([ox[near], oy[near]], axis=1), 3).tolist()
         return {"ok": True, "available": True, "points": pts, "age": round(time.monotonic() - t, 1)}
+
+    def map_grid(self):
+        grid, t = self.latest("/map")
+        if grid is None:
+            return {"ok": True, "available": False}
+        try:
+            tf = self.tf_buffer.lookup_transform("odom", grid.header.frame_id or "map", Time())
+        except tf2_ros.TransformException as e:
+            return {"ok": True, "available": False, "error": e.__class__.__name__}
+        d = np.asarray(grid.data, dtype=np.int16)
+        cells = np.where(d < 0, 255, np.where(d >= MAP_OCCUPIED, 100, 0)).astype(np.uint8)
+        info = grid.info
+        return {
+            "ok": True,
+            "available": True,
+            "resolution": info.resolution,
+            "width": info.width,
+            "height": info.height,
+            "origin": [info.origin.position.x, info.origin.position.y, yaw_of(info.origin.orientation)],
+            "map_to_odom": [tf.transform.translation.x, tf.transform.translation.y, yaw_of(tf.transform.rotation)],
+            "data": base64.b64encode(zlib.compress(cells.tobytes(), 6)).decode("ascii"),
+            "age": round(time.monotonic() - t, 1),
+        }
 
     def scan_for_planning(self, cell=0.03):
         bx, by = self.scan_points()
@@ -649,7 +679,27 @@ class RobotBridge(Node):
 
     # ---- camera
 
+    def restart_camera(self):
+        print("camera: no frames, restarting the OAK-D (stop_camera / start_camera)", flush=True)
+        for client, wait in ((self.cam_stop, 20.0), (self.cam_start, 40.0)):
+            if not client.wait_for_service(timeout_sec=3.0):
+                return False
+            fut = client.call_async(Trigger.Request())
+            if not wait_future(fut, wait):
+                return False
+            time.sleep(2.0)
+        time.sleep(4.0)
+        return True
+
     def photo(self):
+        try:
+            return self._photo()
+        except AgentError as e:
+            if e.status != 503 or not self.restart_camera():
+                raise
+            return self._photo()
+
+    def _photo(self):
         self.want_camera()
         requested = time.monotonic()
         deadline = requested + PHOTO_WAIT
@@ -754,8 +804,24 @@ class Mapper:
                 self.message = f"mapping error: {e!r}"
                 print("mapper:", repr(e), flush=True)
 
+    def _adopt(self):
+        """A slam_toolbox started by an earlier agent (agent restarts leave mapping running): keep using it."""
+        out = subprocess.run(["pgrep", "-f", "[a]sync_slam_toolbox_node.*" + MAP_DIR], capture_output=True, text=True)
+        pids = [int(x) for x in out.stdout.split()]
+        if not pids:
+            return False
+        self.proc = _Adopted(pids[0])
+        self.loaded = os.path.exists(MAP_BASE + ".posegraph")
+        self.message = "learning (carried on from before the agent restarted)"
+        self.last_save = time.monotonic()
+        print(f"mapper: adopted running slam_toolbox pid {pids[0]}", flush=True)
+        return True
+
     def _tick(self):
         docked = self._docked()
+        if self.proc is None and self.last_docked is None and self._adopt():
+            self.last_docked = docked
+            return
         running = self.proc is not None and self.proc.poll() is None
         if self.proc is not None and not running:
             self.message = f"slam_toolbox exited (code {self.proc.returncode}); restarts next time on the dock"
@@ -827,18 +893,32 @@ class Mapper:
             print(f"mapper: saved map ({why})", flush=True)
             return True
 
-    def shutdown(self):
+    def shutdown(self, stop_mapping=False):
+        """Save the map. Mapping keeps running (the next agent adopts it) unless stop_mapping / AGENT_MAPPING=0."""
         self._stop.set()
         if self.proc is not None and self.proc.poll() is None:
             self.save("agent stopping")
-            try:
-                os.killpg(self.proc.pid, signal.SIGINT)
-                self.proc.wait(timeout=10)
-            except Exception:
+            if stop_mapping:
                 try:
-                    os.killpg(self.proc.pid, signal.SIGKILL)
+                    os.killpg(os.getpgid(self.proc.pid), signal.SIGINT)
                 except Exception:
                     pass
+
+
+class _Adopted:
+    """Popen-like handle for a slam_toolbox process this agent didn't start."""
+
+    def __init__(self, pid):
+        self.pid = pid
+        self.returncode = None
+
+    def poll(self):
+        try:
+            os.kill(self.pid, 0)
+            return None
+        except OSError:
+            self.returncode = -1
+            return -1
 
 
 def wait_future(future, timeout):
@@ -928,6 +1008,8 @@ def make_handler(bridge, token):
                     return self.send_json(
                         200, {"ok": True, "range": bridge.range_at(bearing, width)}
                     )
+                if route == ("GET", "/map_grid"):
+                    return self.send_json(200, bridge.map_grid())
                 if route == ("GET", "/map"):
                     return self.send_json(200, bridge.map_obstacles())
                 if route == ("GET", "/scan"):
