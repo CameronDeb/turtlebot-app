@@ -99,6 +99,10 @@ class RobotClient:
         """Nearest lidar return (m from the robot centre) within +-width/2 of a bearing (+ = left), or None."""
         raise NotImplementedError
 
+    def scan(self):
+        """Current lidar returns for route planning: (pose, [(x, y), ...] in the odom frame)."""
+        raise NotImplementedError
+
     def motors_on(self) -> dict:
         """Clear the base's e-stop. Returns {"ok", "wheels_enabled", "message"}."""
         raise NotImplementedError

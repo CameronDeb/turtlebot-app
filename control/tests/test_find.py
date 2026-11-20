@@ -9,7 +9,7 @@ from control.commands import CommandError, validate
 from control.detector import SimDetector, clean_query, set_detector
 from control.executor import executor
 from control.interpreter import InterpretError, RuleBasedInterpreter
-from control.models import Job, Photo
+from control.models import Job, Photo, Trip
 from control.robot import set_robot
 from control.robot.sim import SimRobotClient
 
@@ -73,13 +73,49 @@ class FindTests(TestCase):
         self.assertAlmostEqual(math.hypot(self.robot.x, self.robot.y), 0.0, places=6)
         self.assertGreaterEqual(Photo.objects.count(), 8)  # pictures all the way round
 
-    def test_obstacle_in_the_way_stops_the_approach(self):
+    def test_drives_around_an_obstacle_in_the_way(self):
         self.robot.objects = [("red mug", 3.0, 0.0)]
         self.robot.obstacles = [(1.2, 0.0)]  # a box between robot and mug
         job = self.find("red mug")
+        self.assertEqual(job.state, Job.SUCCEEDED, job.message)
+        gap, bearing = self.gap_to(3.0, 0.0)
+        self.assertAlmostEqual(gap, 0.30, delta=0.06)
+        self.assertLess(abs(bearing), 4)
+        self.assertIn("planned route", job.message)
+        for w in Trip.objects.get().waypoints.all():  # every stop along the way kept clear of the box
+            self.assertGreater(math.hypot(w.x - 1.2, w.y), 0.29)
+
+    def test_goes_round_a_table_instead_of_under_the_chairs(self):
+        # Today's real run, as a test: the plant is behind a table with chairs; the lidar sees their legs ~0.45 m
+        # apart (it can see the plant through the gaps), but not the chair bases on the floor between them.
+        legs = [(1.5, y / 100) for y in range(-110, 111, 45)] + [(2.1, y / 100) for y in range(-110, 111, 45)]
+        self.robot.obstacles = legs
+        self.robot.low_obstacles = [(1.5, y / 100) for y in range(-110, 71, 5)]  # sled bases between the legs
+        self.robot.objects = [("potted plant", 3.2, 0.0)]
+        job = self.find("potted plant")
+        self.assertEqual(job.state, Job.SUCCEEDED, job.message)
+        gap, _ = self.gap_to(3.2, 0.0)
+        self.assertAlmostEqual(gap, 0.30, delta=0.06)
+
+    def test_no_route_reports_instead_of_ramming(self):
+        wall = [(1.0, y / 100) for y in range(-400, 401, 10)]  # a wall the lidar sees, object behind it
+        self.robot.obstacles = wall
+        self.robot.objects = [("box", 2.0, 0.0)]
+        job = self.find("box")
         self.assertEqual(job.state, Job.FAILED)
-        self.assertIn("in the way", job.message)
-        self.assertLess(self.robot.x, 1.2 - 0.17)  # never touched it
+        self.assertIn("no clear way", job.message)
+        self.assertAlmostEqual(math.hypot(self.robot.x, self.robot.y), 0.0, places=6)
+
+    def test_low_obstacle_stops_find_instead_of_ramming(self):
+        # Today's real run: the plant was seen through a gap under chairs whose low bases the lidar can't see.
+        self.robot.objects = [("potted plant", 3.0, 0.0)]
+        self.robot.low_obstacles = [(1.0, 0.0)]  # chair base on the floor
+        job = self.find("potted plant")
+        self.assertEqual(job.state, Job.FAILED)
+        self.assertIn("stopped making progress", job.message)
+        self.assertLess(self.robot.x, 1.0 - 0.17 + 0.01)  # stopped at the bar, not through it
+        self.assertEqual(executor.submit("return_home", {}).state, Job.SUCCEEDED)  # and can still get back
+        self.assertAlmostEqual(math.hypot(self.robot.x, self.robot.y), 0.0, places=2)
 
     def test_tall_object_seen_by_lidar(self):
         self.robot.objects = [("trash can", 2.0, 0.0)]

@@ -55,3 +55,14 @@
   moves only while the robot is stopped; removable with a few bolts and repeatable. arm_mount.md redesigned: bracket
   on the front standoffs' existing M4 joints (spacer stack at the bottom, longer screws at the top), front-corner arm
   outside the camera cone, removable arm plate located by two dowel pins (hole + slot).
+
+## 2026-11-20: real-robot tests, guards, route planning (Claude + Cameron, lab)
+- Real robot: turn 15° (16° measured by odom), forward 0.25 m (0.26), Find "chair" (2.53 m, stopped in front of the
+  office chair; real gap not measured), Return (back within ~1 cm by odometry). Cameron then ran GUI Finds himself:
+  "potted plant" from 2.87 m and "febreeze bottle" twice, all succeeded.
+- First plant run failed: the plant was seen through the gaps under a table/chairs; Find drove straight, hit a chair's
+  low sled base (invisible to the lidar) and pushed ~25 s until the Create 3 aborted. Cameron: "add guards", "look for
+  a clear path first".
+- Built: agent 1.2 (no-progress/hazard guards, refuse forward with bumper pressed, GET /scan), route planning for
+  Find, off-axis distance fix, tests for low obstacles / table / wall / detour (55 total, pass on the simulator).
+  Deployed agent 1.2; not yet tested on the real robot.

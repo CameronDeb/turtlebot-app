@@ -122,6 +122,14 @@ class ExecutorSimTests(TestCase):
         job = self.run_cmd("forward", distance=1.0, check_clear=False)
         self.assertEqual(job.state, Job.SUCCEEDED)
 
+    def test_forward_into_low_obstacle_reports_stall(self):
+        self.robot.docked = False
+        self.robot.low_obstacles = [(0.6, 0.0)]  # below the lidar
+        job = self.run_cmd("forward", distance=1.0)
+        self.assertEqual(job.state, Job.FAILED)
+        self.assertIn("stopped after 0.4", job.message)
+        self.assertIn("lidar can't see", job.message)
+
     def test_motors_off_refuses_motion(self):
         self.robot.docked = False
         self.robot.wheels_enabled = False

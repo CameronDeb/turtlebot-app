@@ -5,8 +5,10 @@ undock backs up 0.35 m and turns 180 deg; dock only works from within 1 m while 
 fails while docked; a forward move is shortened to stop 0.10 m before an obstacle in its path (refused only when
 there is no room); a motion can be stopped part-way; the motors can be switched off (e-stop).
 
-Obstacles are points the lidar sees. Objects are small things on the floor (below the lidar) that the camera sees
-and the simulated detector reports, so the whole object search can be tried without the robot.
+Obstacles are points the lidar sees. Low obstacles are points it can't see (chair bases, cables): driving into one
+stops the robot like the agent's no-progress guard does (outcome "stalled"). Objects are small things on the floor
+(below the lidar) that the camera sees and the simulated detector reports, so the whole object search can be tried
+without the robot.
 """
 
 import io
@@ -35,10 +37,11 @@ def _wrap(a):
 class SimRobotClient(RobotClient):
     name = "sim"
 
-    def __init__(self, delay=1.0, obstacles=(), objects=()):
+    def __init__(self, delay=1.0, obstacles=(), objects=(), low_obstacles=()):
         self.delay = delay  # seconds per motion
         self.obstacles = list(obstacles)  # (x, y) points the lidar sees
         self.objects = list(objects)  # (label, x, y) small objects on the floor the camera sees
+        self.low_obstacles = list(low_obstacles)  # (x, y) points below the lidar: the robot gets stuck on them
         self._lock = threading.Lock()
         self._busy = threading.Lock()
         self._stop = threading.Event()
@@ -148,13 +151,24 @@ class SimRobotClient(RobotClient):
         def fn():
             steps = 20
             step = distance / steps
+            stuck = []
 
             def s():
+                if stuck:
+                    return
+                for ox, oy in self.low_obstacles:
+                    ahead, side = self._local(ox, oy)
+                    if abs(side) < PATH_HALF_WIDTH and 0 < ahead - BODY_FRONT < step:
+                        stuck.append(True)  # the bumper reaches it: stuck, like the real no-progress guard
+                        return
                 self.docked = False
                 self.x += step * math.cos(self.yaw)
                 self.y += step * math.sin(self.yaw)
 
-            return ("succeeded" if self._animate(steps, s) else "canceled"), None
+            done = self._animate(steps, s)
+            if stuck:
+                return "stalled", None
+            return ("succeeded" if done else "canceled"), None
 
         return self._motion(fn, raw)
 
@@ -209,6 +223,14 @@ class SimRobotClient(RobotClient):
 
     def stop(self):
         self._stop.set()
+
+    def scan(self):
+        with self._lock:
+            if self.docked:
+                raise RobotError("no recent lidar scan (the lidar stops while docked)")
+            pose = self._pose()
+            pts = [(x, y) for x, y in self.obstacles if math.hypot(x - self.x, y - self.y) < 8.0]
+        return pose, pts
 
     def range_at(self, bearing_deg, width_deg=6.0):
         with self._lock:

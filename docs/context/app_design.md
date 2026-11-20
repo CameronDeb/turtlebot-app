@@ -39,6 +39,19 @@
   disables the drive motors (`/wheel_status.wheels_enabled = false`); motion goals are then accepted but never move.
   The agent reports `wheels_enabled`, refuses motion while it is false, and `POST /motors` calls `/e_stop` with
   `e_stop_on: false`. The UI shows a banner with a **Motors on** button. (Found 2026-11-18 when nothing would move.)
+- **Guards (agent 1.2, 2026-11-20)**, on every drive and turn: **no progress** for 1.5 s (< 2 cm or < 3°) cancels
+  the motion (outcome `stalled`); Create 3 hazards (bump, cliff, wheel drop, stall) cancel it too, but
+  `/hazard_detection` is **not republished to the Pi** on our robot (commented out in turtlebot4_bringup
+  `republisher.yaml`; enabling it is a robot config change, ask Cameron). Forward is refused while the bumper is
+  pressed. Added after Find drove into a chair's low sled base (below the 19 cm lidar plane) and pushed for 25 s.
+- **Route planning for Find (`pathplan.py`, 2026-11-20)**: the object's sighting becomes an odom position; each leg
+  plans an A* route on a 5 cm grid from a fresh lidar scan (`GET /scan`), keep-out 0.30 m (gaps between legs
+  narrower than ~0.6 m are closed, which keeps it from going under tables/chairs), extra cost inside 0.50 m; drive
+  ≤1 m, re-look when the object should be in view (re-anchors the position, or keeps the remembered one if it is
+  hidden), re-plan. No route → it reports instead of driving. Unseen space counts as free. Demo on the Oct 28 lidar
+  map: `turtlebot-gs/tools/route_demo.py` → `turtlebot-gs/results/lidar_map/route_demo_run_06_L.png`.
+- **Distance off-axis fix (2026-11-20)**: depth and floor geometry give distance along the camera axis; along the
+  sight line it is longer by 1/cos(angle off axis). Found by the route tests (12% short at 28°).
 - **Object search (`find`)**: see `executor.do_find` and `vision.py`.
   - Detector: Grounding DINO tiny in WSL (`detector/serve.py`, env `detect`, RTX 5080, ~0.2 s per picture),
     auto-started by `control/detector.py`. With the simulator, `SimDetector` uses the simulator's ground truth.

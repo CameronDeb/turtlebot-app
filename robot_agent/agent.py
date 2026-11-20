@@ -9,6 +9,8 @@ Endpoints (JSON; every request except GET /ping needs the header `X-Agent-Token:
   GET  /status                        pose (odom -> base_link), battery, dock, sensor ages, busy
   GET  /photo                         a fresh camera frame: base64 PNG (+ aligned 16-bit depth PNG when available)
   GET  /range?bearing=deg&width=deg  nearest lidar return within +-width/2 of a bearing (base_link, + = left)
+  GET  /scan                          current lidar returns (base_link, robot body removed, thinned to ~3 cm) and
+                                      the robot pose at that moment, for route planning on the PC
   POST /drive   {"distance": m, "speed": m/s, "check_clear": bool, "margin": m}   forward only
   POST /rotate  {"angle_deg": deg (+ = left/CCW), "speed": rad/s}
   POST /undock  {}
@@ -21,8 +23,15 @@ Obstacle handling for /drive with check_clear (the default): the move is shorten
 nearest lidar return in the robot's path (it is refused only if there is no room at all), and the lidar keeps
 watching while the robot drives, cancelling the motion if something comes within STOP_GAP of the bumper.
 
-Motion endpoints return 200 with "outcome" = succeeded | canceled | aborted | obstacle plus the pose before and
-after, so the caller can log what really happened even when a motion was stopped part-way. Errors that prevent a
+Guards on every drive and rotate (always on, whatever check_clear says):
+  - no progress: if the robot hasn't moved STALL_DIST (or turned STALL_ANGLE) in STALL_TIME while it should be
+    moving, the motion is canceled (outcome "stalled"). This catches pushing against things the lidar can't see
+    (chair bases, cables, low bars below the 19 cm scan plane).
+  - Create 3 hazards (bump, cliff, wheel drop, stall) cancel the motion (outcome "bumped" / "cliff" / ...). Only
+    works if /hazard_detection is republished to the Pi (turtlebot4_bringup republisher.yaml; off by default).
+
+Motion endpoints return 200 with "outcome" = succeeded | canceled | aborted | obstacle | stalled | bumped | cliff |
+wheel_drop plus the pose before and after, so the caller can log what really happened even when a motion was stopped part-way. Errors that prevent a
 motion from starting (busy, blocked path, no lidar, motors off, bad input) return 4xx/5xx with
 {"ok": false, "error": "..."}.
 
@@ -48,7 +57,7 @@ import tf2_ros
 from action_msgs.msg import GoalStatus
 from geometry_msgs.msg import TwistStamped
 from irobot_create_msgs.action import Dock, DriveDistance, RotateAngle, Undock
-from irobot_create_msgs.msg import DockStatus, WheelStatus
+from irobot_create_msgs.msg import DockStatus, HazardDetectionVector, WheelStatus
 from irobot_create_msgs.srv import EStop
 from rclpy.action import ActionClient
 from rclpy.callback_groups import ReentrantCallbackGroup
@@ -59,7 +68,7 @@ from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
 from sensor_msgs.msg import BatteryState, Image, LaserScan
 
-VERSION = "1.1"
+VERSION = "1.2"
 
 # Motion limits (the web app uses smaller ones; these are the hard caps on the robot side).
 MAX_DRIVE_M = 5.0
@@ -76,6 +85,11 @@ PATH_HALF_WIDTH = 0.21  # half width of the corridor the robot sweeps
 DEFAULT_MARGIN = 0.10  # stop this far before the nearest obstacle in the path
 STOP_GAP = 0.06  # while driving: cancel if anything is closer than this to the bumper
 LOOK_AHEAD = 6.0  # how far ahead the path is checked (m)
+STALL_TIME = 1.5  # s without progress while moving -> stop
+STALL_DIST = 0.02  # m
+STALL_ANGLE = 0.05  # rad (~3 deg)
+HAZARD_MAX_AGE = 0.5  # s
+HAZARD_NAMES = {1: "bumped", 2: "cliff", 3: "stalled", 4: "wheel_drop"}  # HazardDetection.type
 SCAN_MAX_AGE = (
     1.0  # s; the lidar motor stops while docked, so a docked robot has no fresh scan
 )
@@ -229,6 +243,7 @@ class RobotBridge(Node):
             ("/battery_state", BatteryState),
             ("/dock_status", DockStatus),
             ("/wheel_status", WheelStatus),
+            ("/hazard_detection", HazardDetectionVector),
         ):
             self.create_subscription(
                 mtype,
@@ -348,6 +363,17 @@ class RobotBridge(Node):
             return math.inf
         return max(float(bx[in_path].min()) - BODY_FRONT, 0.0)
 
+    def scan_for_planning(self, cell=0.03):
+        bx, by = self.scan_points()
+        pose = self.pose()
+        seen, pts = set(), []
+        for x, y in zip(bx.tolist(), by.tolist()):
+            key = (round(x / cell), round(y / cell))
+            if key not in seen:
+                seen.add(key)
+                pts.append([round(x, 3), round(y, 3)])
+        return {"ok": True, "pose": pose, "points": pts}
+
     def range_at(self, bearing_deg, width_deg):
         """Nearest lidar return (distance from base_link) within +-width/2 of a bearing, or None."""
         bx, by = self.scan_points()
@@ -357,6 +383,53 @@ class RobotBridge(Node):
         if not sel.any():
             return None
         return round(float(np.hypot(bx[sel], by[sel]).min()), 3)
+
+    def hazard(self, ignore=()):
+        """Name of a current Create 3 hazard (bumped, cliff, stalled, wheel_drop), or None."""
+        msg, t = self.latest("/hazard_detection")
+        if msg is None or time.monotonic() - t > HAZARD_MAX_AGE:
+            return None
+        for d in msg.detections:
+            name = HAZARD_NAMES.get(d.type)
+            if name and name not in ignore:
+                return name
+        return None
+
+    def progress_watch(self, linear, check_gap=False, ignore_hazards=()):
+        """A watch() for run_motion: stops on hazards, on no progress, and (check_gap) on the lidar."""
+        state = {"t": time.monotonic(), "pose": None}
+
+        def watch():
+            h = self.hazard(ignore_hazards)
+            if h:
+                return h
+            now = time.monotonic()
+            try:
+                pose = self.pose()
+            except AgentError:
+                pose = None
+            if pose is not None:
+                ref = state["pose"]
+                if ref is None:
+                    state["pose"], state["t"] = pose, now
+                else:
+                    if linear:
+                        moved = math.hypot(pose["x"] - ref["x"], pose["y"] - ref["y"]) >= STALL_DIST
+                    else:
+                        moved = abs(wrap(pose["yaw"] - ref["yaw"])) >= STALL_ANGLE
+                    if moved:
+                        state["pose"], state["t"] = pose, now
+                    elif now - state["t"] > STALL_TIME:
+                        return "stalled"
+            if check_gap:
+                try:
+                    if self.gap_ahead() < STOP_GAP:
+                        return "obstacle"
+                except AgentError:
+                    pass  # a momentarily stale scan doesn't stop the robot; the other guards still do
+            return None
+
+        return watch
 
     def wheels_enabled(self):
         wheels, t = self.latest("/wheel_status")
@@ -407,8 +480,8 @@ class RobotBridge(Node):
     def run_motion(self, name, goal, timeout, watch=None):
         """Send one action goal and wait for it. Returns (outcome, result or None).
 
-        watch: optional callable polled every 0.1 s while the goal runs; if it returns True the goal is canceled
-        and the outcome is "obstacle"."""
+        watch: optional callable polled every 0.1 s while the goal runs; if it returns a reason (e.g. "stalled")
+        the goal is canceled and that reason is the outcome."""
         if not self._motion_lock.acquire(blocking=False):
             raise AgentError(409, f"robot is busy ({self._active_name})")
         try:
@@ -442,12 +515,13 @@ class RobotBridge(Node):
                     try:
                         hit = watch()
                     except AgentError:
-                        hit = False  # a momentarily stale scan doesn't stop the robot; the bumper still does
+                        hit = None
                     if hit:
                         handle.cancel_goal_async()
                         self.publish_zero()
                         wait_future(result_future, 3.0)
-                        return "obstacle", None
+                        print(f"{name}: stopped ({hit})", flush=True)
+                        return hit, None
                     time.sleep(0.1)
             if not wait_future(result_future, timeout):
                 handle.cancel_goal_async()
@@ -630,6 +704,8 @@ def make_handler(bridge, token):
                     return self.send_json(
                         200, {"ok": True, "range": bridge.range_at(bearing, width)}
                     )
+                if route == ("GET", "/scan"):
+                    return self.send_json(200, bridge.scan_for_planning())
                 if route == ("POST", "/motors"):
                     if self.body().get("enabled") is not True:
                         raise AgentError(400, 'send {"enabled": true}')
@@ -679,7 +755,9 @@ def make_handler(bridge, token):
             if not isinstance(check, bool):
                 raise AgentError(400, "'check_clear' must be true or false")
             before = bridge.pose()
-            requested, gap, watch = distance, None, None
+            if bridge.hazard() == "bumped":
+                raise AgentError(409, "the bumper is pressed: something is touching the front of the robot")
+            requested, gap = distance, None
             if check:
                 gap = bridge.gap_ahead()
                 room = gap - margin
@@ -689,10 +767,7 @@ def make_handler(bridge, token):
                         f"path blocked: obstacle {gap:.2f} m ahead of the bumper (no room to move forward)",
                     )
                 distance = min(distance, room)
-
-                def watch():
-                    return bridge.gap_ahead() < STOP_GAP
-
+            watch = bridge.progress_watch(linear=True, check_gap=check)
             goal = DriveDistance.Goal(distance=distance, max_translation_speed=speed)
             outcome, _ = bridge.run_motion(
                 "drive", goal, timeout=distance / speed * 2.0 + 10.0, watch=watch
@@ -715,8 +790,12 @@ def make_handler(bridge, token):
             )
             before = bridge.pose()
             goal = RotateAngle.Goal(angle=math.radians(angle), max_rotation_speed=speed)
+            # Turning is how the robot gets free after a bump, so an existing bump doesn't stop a turn.
             outcome, _ = bridge.run_motion(
-                "rotate", goal, timeout=abs(math.radians(angle)) / speed * 2.0 + 10.0
+                "rotate",
+                goal,
+                timeout=abs(math.radians(angle)) / speed * 2.0 + 10.0,
+                watch=bridge.progress_watch(linear=False, ignore_hazards=("bumped",)),
             )
             return self.motion_reply(
                 before, outcome, {"requested": {"angle_deg": angle}}

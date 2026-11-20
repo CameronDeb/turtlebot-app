@@ -108,5 +108,12 @@ class HttpRobotClient(RobotClient):
         q = urllib.parse.urlencode({"bearing": f"{bearing_deg:.2f}", "width": f"{width_deg:.2f}"})
         return self._request("GET", f"/range?{q}", timeout=5.0).get("range")
 
+    def scan(self):
+        d = self._request("GET", "/scan", timeout=5.0)
+        pose = Pose.from_dict(d["pose"])
+        c, s = math.cos(pose.yaw), math.sin(pose.yaw)
+        pts = [(pose.x + c * x - s * y, pose.y + s * x + c * y) for x, y in d.get("points", [])]
+        return pose, pts
+
     def motors_on(self):
         return self._request("POST", "/motors", {"enabled": True}, timeout=15.0)

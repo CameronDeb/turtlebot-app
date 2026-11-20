@@ -14,7 +14,7 @@ from django.db import close_old_connections, connections, transaction
 from django.db.models import Max
 from django.utils import timezone
 
-from . import planner, vision
+from . import pathplan, planner, vision
 from .archive import save_photo
 from .commands import describe, validate
 from .detector import DetectorError, get_detector
@@ -32,6 +32,16 @@ FIND_MAX_LEGS = 12
 FIND_CENTER_DEG = 2.5  # turn toward the object when it is further off-centre than this
 FIND_UNKNOWN_STEP = 0.30  # leg length when the distance can't be estimated
 FIND_NEAR = 0.9  # m: an object lost from view closer than this has gone below the camera's view
+
+
+# Motions stopped by the agent's guards (outcome -> what to tell the user)
+GUARD_STOPS = {
+    "stalled": "the robot stopped making progress, probably pushing against something low that the lidar can't "
+    "see (a chair base, a cable). Back off or turn away before trying again",
+    "bumped": "the bumper hit something",
+    "cliff": "a cliff sensor saw a drop",
+    "wheel_drop": "a wheel dropped (lifted or over an edge)",
+}
 
 
 class Busy(Exception):
@@ -119,6 +129,10 @@ class JobContext:
             raise Canceled()
         if result.outcome == "obstacle":
             return  # stopped by the lidar watch: the caller decides what that means
+        if result.outcome in GUARD_STOPS:
+            moved = _moved(result)
+            after = f" after {moved:.2f} m" if moved is not None and moved >= 0.01 else ""
+            raise RobotError(f"{what} stopped{after}: {GUARD_STOPS[result.outcome]}")
         if not result.succeeded:
             raise RobotError(f"{what} didn't finish (robot reported '{result.outcome}': bumper, cliff or wheel stall?)")
 
@@ -374,76 +388,115 @@ def do_find(ctx, p):
         far = f", about {target['distance']:.1f} m away" if target["distance"] else ""
         return f"{seen}{far}, and turned to face it."
 
-    # 2. Approach: turn to it, drive part of the way, look again; repeat.
-    travelled, lost, last = 0.0, 0, target
+    # 2. Approach along a route planned around what the lidar sees, re-planned after every leg.
+    goal = _to_odom(target, data.pose or ctx.robot.pose())
+    if goal is None:
+        raise RobotError(f"{seen}, but couldn't tell how far away it is{_ids(ctx)}")
+    hfov = vision.horizontal_fov_deg(data)
+    r_goal = standoff + BODY_FRONT
+    travelled, misses, legs, stuck = 0.0, 0, 0, 0
     for _ in range(FIND_MAX_LEGS):
         ctx.check()
-        if abs(last["bearing"]) > FIND_CENTER_DEG:
-            expected = last["distance"]
-            ctx.rotate(last["bearing"])
-            photo, data, dets = ctx.look(query)
-            cand = _pick(dets)
-            if cand is None:
-                lost += 1
-                if lost >= 2:
-                    raise RobotError(f"lost sight of the {query} after turning toward it{_ids(ctx)}")
-                last = {**last, "bearing": 0.0}
-            else:
-                lost, last = 0, _fill_distance(cand, expected)
-        dist = last["distance"]
-        gap = None if dist is None else dist - BODY_FRONT
-        move = FIND_UNKNOWN_STEP if gap is None else gap - standoff
-        if gap is not None and move < 0.05:
-            return f"{seen}. Drove {travelled:.2f} m and stopped about {max(gap, 0):.2f} m in front of it{_ids(ctx)}."
-        move = min(move, FIND_MAX_LEG, p["max_range"] - travelled)
-        if move < 0.05:
+        pose, points = ctx.robot.scan()
+        route = pathplan.plan((pose.x, pose.y), goal, r_goal, points)
+        if route is None:
+            raise RobotError(
+                f"{seen}, but there's no clear way to it: furniture, or gaps narrower than about 0.6 m, are in the "
+                f"way{_ids(ctx)}"
+            )
+        if not route:
+            break
+        budget = min(FIND_MAX_LEG, p["max_range"] - travelled)
+        if budget < 0.05:
             raise RobotError(f"drove {travelled:.2f} m (the search limit) without reaching the {query}{_ids(ctx)}")
-        r = ctx.drive(move, check_clear=True)
-        moved = _moved(r)
-        moved = move if moved is None else moved
-        travelled += moved
-        raw = r.raw or {}
-        if r.outcome == "obstacle":
-            raise RobotError(
-                f"stopped after {travelled:.2f} m: something came right up to the front of the robot{_ids(ctx)}"
-            )
-        if raw.get("shortened") and moved < move - 0.03:
-            ob = raw.get("obstacle_gap")
-            if gap is not None and ob is not None and abs(ob - gap) < 0.25:
-                # The lidar sees the object itself (it is tall enough): this is as close as is safe.
-                return (
-                    f"{seen}. Drove {travelled:.2f} m and stopped about {max(ob - moved, 0):.2f} m in front of "
-                    f"it{_ids(ctx)}."
+        legs += 1
+        progress = 0.0
+        for wx, wy in route:
+            pose = ctx.robot.pose()
+            turn = planner.wrap(math.atan2(wy - pose.y, wx - pose.x) - pose.yaw)
+            if abs(math.degrees(turn)) > 3.0:
+                ctx.rotate(math.degrees(turn))
+            step = min(math.hypot(wx - pose.x, wy - pose.y), budget)
+            if step < 0.03:
+                continue
+            r = ctx.drive(step, check_clear=True)  # guard stops (stalled, bumped, ...) raise RobotError
+            moved = _moved(r)
+            moved = step if moved is None else moved
+            travelled += moved
+            progress += moved
+            budget -= moved
+            if r.outcome == "obstacle":
+                raise RobotError(
+                    f"stopped after {travelled:.2f} m: something came right up to the front of the robot{_ids(ctx)}"
                 )
-            where = f"{ob:.2f} m ahead" if ob is not None else "ahead"
-            raise RobotError(
-                f"something is in the way ({where}) between the robot and the {query}; stopped after "
-                f"{travelled:.2f} m. Steer around it and run Find again{_ids(ctx)}"
-            )
-        remaining = None if dist is None else dist - moved
-        photo, data, dets = ctx.look(query)
-        cand = _pick(dets)
-        if cand is None:
-            if remaining is not None and remaining - BODY_FRONT < FIND_NEAR:
-                # Close and no longer in the picture: it has gone below the camera's view. Finish on dead reckoning.
-                creep = min(remaining - BODY_FRONT - standoff, 0.5)
-                if creep > 0.05:
-                    r = ctx.drive(creep, check_clear=True)
-                    crept = _moved(r)
-                    crept = creep if crept is None else crept
-                    travelled += crept
-                    remaining -= crept
-                return (
-                    f"{seen}. Drove {travelled:.2f} m; it is now below the camera's view, about "
-                    f"{max(remaining - BODY_FRONT, 0):.2f} m in front of the bumper{_ids(ctx)}."
-                )
-            lost += 1
-            if lost >= 2:
-                raise RobotError(f"lost sight of the {query} after driving {travelled:.2f} m{_ids(ctx)}")
-            last = {**last, "bearing": 0.0, "distance": remaining}
-            continue
-        lost, last = 0, _fill_distance(cand, remaining)
-    raise RobotError(f"didn't reach the {query} after {FIND_MAX_LEGS} legs ({travelled:.2f} m){_ids(ctx)}")
+            if (r.raw or {}).get("shortened") and moved < step - 0.03:
+                break  # the lidar sees something new on this leg: re-plan from a fresh scan
+            if budget < 0.05:
+                break
+        stuck = stuck + 1 if progress < 0.05 else 0
+        if stuck >= 2:
+            raise RobotError(f"can't get past an obstacle on the way to the {query}{_ids(ctx)}")
+        # Look again when the object should be visible (not when it's already below the camera's view).
+        pose = ctx.robot.pose()
+        dist = math.hypot(goal[0] - pose.x, goal[1] - pose.y)
+        if dist - BODY_FRONT > FIND_NEAR:
+            bearing = math.degrees(planner.wrap(math.atan2(goal[1] - pose.y, goal[0] - pose.x) - pose.yaw))
+            if abs(bearing) > hfov * 0.35:
+                ctx.rotate(bearing)
+            photo, data, dets = ctx.look(query)
+            match = _match(dets, data.pose or ctx.robot.pose(), goal)
+            if match is not None:
+                misses = 0
+                new_goal = _to_odom(match, data.pose or ctx.robot.pose())
+                if new_goal is not None:
+                    goal = new_goal
+            else:
+                misses += 1  # hidden behind something on the way round: keep going to where it was seen
+                if misses >= 4:
+                    raise RobotError(f"lost sight of the {query} after driving {travelled:.2f} m{_ids(ctx)}")
+    else:
+        raise RobotError(f"didn't reach the {query} after {FIND_MAX_LEGS} legs ({travelled:.2f} m){_ids(ctx)}")
+
+    # 3. Face it and take a last picture for the record.
+    pose = ctx.robot.pose()
+    bearing = math.degrees(planner.wrap(math.atan2(goal[1] - pose.y, goal[0] - pose.x) - pose.yaw))
+    if abs(bearing) > FIND_CENTER_DEG:
+        ctx.rotate(bearing)
+    pose = ctx.robot.pose()
+    extra = math.hypot(goal[0] - pose.x, goal[1] - pose.y) - BODY_FRONT - standoff
+    if extra > 0.04:  # the route ends on a 5 cm grid: close the last few centimetres straight in
+        r = ctx.drive(min(extra, 0.3), check_clear=True)
+        travelled += _moved(r) or 0.0
+    ctx.photo()
+    pose = ctx.robot.pose()
+    gap = max(math.hypot(goal[0] - pose.x, goal[1] - pose.y) - BODY_FRONT, 0.0)
+    how = "" if legs <= 1 else f" along a planned route ({legs} legs)"
+    return f"{seen}. Drove {travelled:.2f} m{how} and stopped about {gap:.2f} m in front of it{_ids(ctx)}."
+
+
+def _to_odom(det, pose):
+    """A located detection (bearing deg, distance m from base_link) -> (x, y) in the odom frame, or None."""
+    if det.get("distance") is None or pose is None:
+        return None
+    a = pose.yaw + math.radians(det["bearing"])
+    return pose.x + det["distance"] * math.cos(a), pose.y + det["distance"] * math.sin(a)
+
+
+def _match(dets, pose, goal):
+    """The detection that is (probably) the object we are heading for, or None."""
+    dist = math.hypot(goal[0] - pose.x, goal[1] - pose.y)
+    radius = max(0.6, 0.35 * dist)
+    best = None
+    for d in dets:
+        xy = _to_odom(d, pose)
+        if xy is None:
+            ang = math.degrees(planner.wrap(math.atan2(goal[1] - pose.y, goal[0] - pose.x) - pose.yaw))
+            ok = abs(ang - d["bearing"]) < 10.0  # no distance: accept if it is in the right direction
+        else:
+            ok = math.dist(xy, goal) <= radius
+        if ok and (best is None or d["score"] > best["score"]):
+            best = d
+    return best
 
 
 def do_sequence(ctx, p):

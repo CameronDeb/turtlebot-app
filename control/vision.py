@@ -80,13 +80,16 @@ def locate(det, photo, range_at=None):
     x0, y0, x1, y1 = det["box"]
     bearing_cam = bearing_deg((x0 + x1) / 2, intr, cam)
     half_width = abs(bearing_deg(x0, intr, cam) - bearing_deg(x1, intr, cam)) / 2
+    # Depth and the floor geometry both measure distance along the camera's forward axis; along the sight line to
+    # an object off to the side it is longer by 1 / cos(angle off the axis).
+    off_axis = math.cos(math.atan2(intr["cx"] - (x0 + x1) / 2, intr["fx"]))
     cues = {}
     d = depth_distance(photo.depth_png, det["box"])
     if d is not None:
-        cues["depth"] = to_base(d, bearing_cam, cam)[0]
+        cues["depth"] = to_base(d / off_axis, bearing_cam, cam)[0]
     d = floor_distance(y1, photo.height, intr, cam)
     if d is not None:
-        cues["floor"] = to_base(d, bearing_cam, cam)[0]
+        cues["floor"] = to_base(d / off_axis, bearing_cam, cam)[0]
     bearing = to_base(2.0, bearing_cam, cam)[1]  # bearing from base_link of a point ~2 m out
     if range_at is not None:
         try:
