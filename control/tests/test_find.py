@@ -105,6 +105,20 @@ class FindTests(TestCase):
         self.assertEqual(job.state, Job.SUCCEEDED, job.message)
         self.assertIn("planned route", job.message)
 
+    def test_live_lidar_overrules_stale_map(self):
+        # The learned map still has chairs between the robot and the object, but they've been moved: the lidar now
+        # sees straight through to the far wall. Find must go straight, not report it as boxed in.
+        self.robot.obstacles = [(5.0, y / 100) for y in range(-200, 201, 10)]  # far wall the lidar sees
+        self.robot.remembered = [(1.5, y / 100) for y in range(-100, 101, 10)] + [
+            (3.0 + 0.6 * math.cos(a / 12 * 2 * math.pi), 0.6 * math.sin(a / 12 * 2 * math.pi)) for a in range(12)
+        ]
+        self.robot.objects = [("potted plant", 3.0, 0.0)]
+        job = self.find("potted plant")
+        self.assertEqual(job.state, Job.SUCCEEDED, job.message)
+        self.assertNotIn("boxed in", job.message)
+        gap, _ = self.gap_to(3.0, 0.0)
+        self.assertAlmostEqual(gap, 0.30, delta=0.06)
+
     def test_goes_round_a_table_instead_of_under_the_chairs(self):
         # Today's real run, as a test: the plant is behind a table with chairs; the lidar sees their legs ~0.45 m
         # apart (it can see the plant through the gaps), but not the chair bases on the floor between them.
@@ -117,14 +131,26 @@ class FindTests(TestCase):
         gap, _ = self.gap_to(3.2, 0.0)
         self.assertAlmostEqual(gap, 0.30, delta=0.06)
 
-    def test_no_route_reports_instead_of_ramming(self):
+    def test_boxed_in_object_gets_as_close_as_it_safely_can(self):
+        # chairs/table legs all round the object, gaps too narrow: stop at the nearest safe spot, facing it
+        ring = [(3.0 + 0.6 * math.cos(a / 12 * 2 * math.pi), 0.6 * math.sin(a / 12 * 2 * math.pi)) for a in range(12)]
+        self.robot.obstacles = ring
+        self.robot.objects = [("potted plant", 3.0, 0.0)]
+        job = self.find("potted plant")
+        self.assertEqual(job.state, Job.SUCCEEDED, job.message)
+        self.assertIn("boxed in", job.message)
+        gap, bearing = self.gap_to(3.0, 0.0)
+        self.assertLess(gap, 0.9)
+        self.assertLess(abs(bearing), 4)
+
+    def test_object_behind_a_wall_goes_up_to_the_wall(self):
         wall = [(1.0, y / 100) for y in range(-400, 401, 10)]  # a wall the lidar sees, object behind it
         self.robot.obstacles = wall
         self.robot.objects = [("box", 2.0, 0.0)]
         job = self.find("box")
-        self.assertEqual(job.state, Job.FAILED)
-        self.assertIn("no clear way", job.message)
-        self.assertAlmostEqual(math.hypot(self.robot.x, self.robot.y), 0.0, places=6)
+        self.assertEqual(job.state, Job.SUCCEEDED, job.message)
+        self.assertIn("boxed in", job.message)  # drove up to the wall, as close as it can safely get
+        self.assertLess(self.robot.x, 1.0 - 0.17)  # never into or through the wall
 
     def test_gets_stuck_once_then_goes_round_and_never_back(self):
         # Today's real run: the plant was seen through a gap under chairs whose low bases the lidar can't see.

@@ -138,6 +138,77 @@ def plan(start, target, goal_radius, points):
     return _shorten(g, pts, passable)
 
 
+def drop_seen_through(robot_xy, scan_pts, map_pts, margin=0.15, bin_deg=1.0):
+    """Map obstacles the live lidar currently sees *through* are stale (a chair moved, a person walked by while it
+    was mapping): drop them. Map points in directions with no live return are kept (nothing known there now)."""
+    nbins = int(round(360 / bin_deg))
+    first_hit = [math.inf] * nbins
+    rx, ry = robot_xy
+    for x, y in scan_pts:
+        b = int(math.degrees(math.atan2(y - ry, x - rx)) % 360 / bin_deg) % nbins
+        d = math.hypot(x - rx, y - ry)
+        if d < first_hit[b]:
+            first_hit[b] = d
+    kept = []
+    for x, y in map_pts:
+        d = math.hypot(x - rx, y - ry)
+        b = int(math.degrees(math.atan2(y - ry, x - rx)) % 360 / bin_deg) % nbins
+        hit = min(first_hit[b], first_hit[(b - 1) % nbins], first_hit[(b + 1) % nbins])
+        if hit == math.inf or hit <= d + margin:
+            kept.append((x, y))  # not contradicted by what the lidar sees now
+    return kept
+
+
+def plan_closest(start, target, points):
+    """When the target can't be reached (boxed in by furniture): route to the reachable free spot nearest to it.
+
+    Returns (waypoints, distance from that spot to the target), or None if nothing is reachable."""
+    g = build_grid(start, target, points)
+    if g is None:
+        return None
+    si, sj = g.cell(*start)
+    if not g.inside(si, sj):
+        return None
+
+    def passable(i, j):
+        return g.free(i, j) or (g.inside(i, j) and math.dist(g.centre(i, j), start) <= START_ESCAPE)
+
+    moves = [(1, 0, CELL), (-1, 0, CELL), (0, 1, CELL), (0, -1, CELL)] + [
+        (di, dj, CELL * math.sqrt(2)) for di in (-1, 1) for dj in (-1, 1)
+    ]
+    best = {(si, sj): 0.0}
+    came = {}
+    heap = [(0.0, si, sj)]
+    end, end_d = None, math.inf
+    while heap:
+        cost, i, j = heapq.heappop(heap)
+        if cost > best.get((i, j), math.inf):
+            continue
+        d = math.dist(g.centre(i, j), target)
+        if g.free(i, j) and d < end_d - 1e-9:
+            end, end_d = (i, j), d
+        for di, dj, base in moves:
+            ni, nj = i + di, j + dj
+            if not passable(ni, nj):
+                continue
+            if di and dj and not (passable(i + di, j) and passable(i, j + dj)):
+                continue
+            nc = cost + _step_cost(g, ni, nj, base)
+            if nc < best.get((ni, nj), math.inf):
+                best[(ni, nj)] = nc
+                came[(ni, nj)] = (i, j)
+                heapq.heappush(heap, (nc, ni, nj))
+    if end is None:
+        return None
+    cells = [end]
+    while cells[-1] in came:
+        cells.append(came[cells[-1]])
+    cells.reverse()
+    pts = [g.centre(i, j) for i, j in cells]
+    pts[0] = start
+    return (_shorten(g, pts, passable) if len(pts) > 1 else []), end_d
+
+
 def _line_ok(g, a, b, passable):
     n = max(1, int(math.dist(a, b) / (CELL / 2)))
     for k in range(n + 1):

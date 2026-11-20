@@ -418,29 +418,44 @@ def do_find(ctx, p):
     r_goal = standoff + BODY_FRONT
     travelled, misses, legs, dodges, stalls = 0.0, 0, 0, 0, 0
     no_go = []  # (x, y) spots where the robot got blocked: planned around for the rest of this search
+    seen_here = {}  # everything the lidar has seen during this search (5 cm cells): stops it flip-flopping between
+    # two routes when an obstacle is visible from one spot but hidden from the other
     route, route_goal = None, None
+    boxed_in = False  # no way to the standoff distance: heading for the closest reachable spot instead
     best = math.inf  # closest it has been to the object
     no_progress = 0
     for _ in range(FIND_MAX_LEGS):
         ctx.check()
         pose, points = ctx.robot.scan()
-        # what the robot sees now + what it learned earlier + where it got blocked
-        points = points + ctx.robot.map_points() + _no_go_points(no_go)
+        for x, y in points:
+            seen_here.setdefault((round(x / 0.05), round(y / 0.05)), (x, y))
+        # what the robot sees now + saw earlier in this search + the learned map (minus what the lidar now sees
+        # through) + where it got blocked
+        learned = pathplan.drop_seen_through((pose.x, pose.y), points, ctx.robot.map_points())
+        points = list(seen_here.values()) + learned + _no_go_points(no_go)
         start_xy = (pose.x, pose.y)
         keep = (
             route
             and route_goal is not None
-            and math.dist(route_goal, goal) < 0.3
+            and math.dist(route_goal, goal) < 0.5
             and pathplan.still_clear(start_xy, route, points)
         )
         if not keep:
             route = pathplan.plan(start_xy, goal, r_goal, points)
             route_goal = goal
             if route is None:
-                raise RobotError(
-                    f"{seen}, but there's no clear way to it: furniture, gaps narrower than about 0.6 m, or places "
-                    f"it already got stuck are in the way{_ids(ctx)}"
-                )
+                # Boxed in (furniture all round it, or places it got stuck): go as close as it safely can.
+                closest = pathplan.plan_closest(start_xy, goal, points)
+                here = math.dist(start_xy, goal)
+                if closest is None or not closest[0] or closest[1] > here - 0.1:
+                    if boxed_in or legs:
+                        boxed_in = True
+                        break  # already as close as it can get
+                    raise RobotError(
+                        f"{seen}, but there's no clear way to it: furniture, gaps narrower than about 0.6 m, or "
+                        f"places it already got stuck are in the way{_ids(ctx)}"
+                    )
+                route, boxed_in = closest[0], True
         if not route:
             break
         budget = min(FIND_MAX_LEG, p["max_range"] - travelled)
@@ -521,7 +536,9 @@ def do_find(ctx, p):
                 misses = 0
                 new_goal = _to_odom(match, data.pose or ctx.robot.pose())
                 if new_goal is not None:
-                    goal = new_goal
+                    # blend: one noisy sighting shouldn't throw the route away; closer views count for more
+                    w = 0.7 if match["score"] >= 0.6 and dist < 2.0 else 0.4
+                    goal = (goal[0] + w * (new_goal[0] - goal[0]), goal[1] + w * (new_goal[1] - goal[1]))
             else:
                 misses += 1  # hidden behind something on the way round: keep going to where it was seen
                 if misses >= 6:
@@ -536,7 +553,7 @@ def do_find(ctx, p):
         ctx.rotate(bearing)
     pose = ctx.robot.pose()
     extra = math.hypot(goal[0] - pose.x, goal[1] - pose.y) - BODY_FRONT - standoff
-    if extra > 0.04:  # the route ends on a 5 cm grid: close the last few centimetres straight in
+    if extra > 0.04 and not boxed_in:  # the route ends on a 5 cm grid: close the last few centimetres straight in
         try:
             r = ctx.drive(min(extra, 0.3), check_clear=True, allow=("stalled",))
             travelled += _moved(r) or 0.0
@@ -546,6 +563,11 @@ def do_find(ctx, p):
     pose = ctx.robot.pose()
     gap = max(math.hypot(goal[0] - pose.x, goal[1] - pose.y) - BODY_FRONT, 0.0)
     how = "" if legs <= 1 else f" along a planned route ({legs} legs)"
+    if boxed_in:
+        return (
+            f"{seen}. It's boxed in by furniture, so it drove {travelled:.2f} m{how} to the closest spot it could "
+            f"safely reach, about {gap:.2f} m from it, and is facing it{_ids(ctx)}."
+        )
     return f"{seen}. Drove {travelled:.2f} m{how} and stopped about {gap:.2f} m in front of it{_ids(ctx)}."
 
 
