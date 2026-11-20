@@ -20,3 +20,11 @@ Source: `turtlebot-gs/notes/robot_config.md` on the lab PC (verified Oct 2026).
 - Rules: ask before robot motion; a person confirms the floor is clear; never drive unattended. Robot-side installs
   are allowed since 2026-11-04 but log them in `turtlebot-gs/notes/session_log.md`, keep the stock bringup working,
   watch SD space.
+
+## WSL mirrored networking (retried 2026-11-20, failed again)
+- With `networkingMode=mirrored` (WSL 2.6.3, Windows build 26200), WSL got `eth2` = the university network
+  (10.134.x) and `eth1` = **169.254.x link-local only** (the Mobile Hotspot adapter is mirrored without its
+  192.168.137.1 address). The route to the robot went via the university gateway; ping 100% loss.
+- Same as the 2026-10-09 attempt. Reverted to NAT (`.wslconfig` comment updated). So ROS 2 on the PC still can't talk
+  to the robot; options: run Nav2 on the Pi, a USB Wi-Fi adapter / router so the robot is on a normal LAN, or a DDS
+  bridge over the agent.
