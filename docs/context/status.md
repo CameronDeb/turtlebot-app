@@ -34,3 +34,11 @@
 - Remap controller B away from EStop? (It's easy to hit by accident; changing it is a robot config change, ask first.)
 - Enable `/hazard_detection` in the robot's republisher.yaml so the bumper reaches the agent? (robot config change)
 - The `/e_stop` service answered `success=False` but the wheels came back on; watch whether Motors on works reliably.
+
+## Nov 22, 2026: Prof. Lee update
+- Travel router (GL.iNet Opal GL-SFT1200) ordered by Prof. Lee. Pick up at ECE 256F on Mon Nov 23 afternoon or from Tue
+  (say you work with Prof. Lee, Amazon package). Plan: robot + lab PC on the router, ROS 2/Nav2 on the PC.
+- IROS focus: revisit policy vs age-only and reconstruction-quality baselines (success + travel). Start real-robot
+  search and verification runs now; fetching is an optional extension.
+- Before the final arm mount: check stability with the arm fully extended, load on the two mounting points, motor voltage.
+- Comparison with GS-LTS / DynaMem / DREAM / MIF: turtlebot-gs/paper/related_work_revisit.md.
