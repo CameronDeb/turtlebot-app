@@ -53,3 +53,8 @@
 - Page: "Object memory" table; admin lists entries. 75 tests pass.
 - Agent 1.8 deployed to the robot Nov 22 (adopted the running slam); web app restarted with migration 0002.
 - Next: B2 verify command (go look at a remembered spot; confirmed / moved / missing; `last_checked`).
+- First real-robot memory scan (Nov 22, job 53, photos #95–#102; contact sheet in
+  turtlebot-gs/results/memory/memory_scan_2026-11-22.jpg; not in this repo because a person is in frame): undock + 8-photo
+  scan for chair/backpack/potted plant/bottle/table → 7 places saved, all in the map frame. 6 real (4 chairs, table,
+  the plant at 3.7 m, 0.77). 1 wrong: a furniture foot 0.6 m away labelled "table" (0.56). Detections at 0.35–0.38
+  (a monitor as "chair", a table) were correctly not kept.
