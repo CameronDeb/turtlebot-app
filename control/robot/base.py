@@ -111,6 +111,12 @@ class RobotClient:
         """Obstacles from the robot's learned map near it, [(x, y), ...] in the odom frame ([] if no map yet)."""
         return []
 
+    def map_to_odom(self):
+        """(x, y, yaw) of the learned map's frame in odom, or None when there is no map (positions then stay in
+        odom, which only holds until the base restarts)."""
+        m = self.status().get("map_to_odom")
+        return None if not m else tuple(m)
+
     def motors_on(self) -> dict:
         """Clear the base's e-stop. Returns {"ok", "wheels_enabled", "message"}."""
         raise NotImplementedError

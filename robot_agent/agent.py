@@ -81,7 +81,7 @@ from rclpy.signals import SignalHandlerOptions
 from rclpy.time import Time
 from sensor_msgs.msg import BatteryState, Image, LaserScan
 
-VERSION = "1.7"
+VERSION = "1.8"
 
 # Motion limits (the web app uses smaller ones; these are the hard caps on the robot side).
 MAX_DRIVE_M = 5.0
@@ -347,6 +347,17 @@ class RobotBridge(Node):
             "yaw": round(yaw_of(tf.transform.rotation), 5),
         }
 
+    def map_to_odom(self):
+        """[x, y, yaw] of the learned map's frame in odom (p_odom = R(yaw) p_map + t), or None without a map.
+        Odom restarts from zero when the base reboots; the map frame doesn't, so the app keeps where objects are
+        in map coordinates."""
+        try:
+            tf = self.tf_buffer.lookup_transform("odom", "map", Time())
+        except tf2_ros.TransformException:
+            return None
+        t = tf.transform.translation
+        return [round(t.x, 4), round(t.y, 4), round(yaw_of(tf.transform.rotation), 5)]
+
     def status(self):
         try:
             pose, pose_error = self.pose(), None
@@ -375,6 +386,7 @@ class RobotBridge(Node):
             },
             "busy": self._motion_lock.locked(),
             "mapping": self.mapper.status() if getattr(self, "mapper", None) else None,
+            "map_to_odom": self.map_to_odom(),
             "active": self._active_name,
             "actions_ready": {k: c.server_is_ready() for k, c in self.actions.items()},
         }

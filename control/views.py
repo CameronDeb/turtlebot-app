@@ -13,7 +13,7 @@ from django.views.decorators.http import require_GET, require_http_methods, requ
 from .commands import KINDS, MAX_FORWARD_M, CommandError, describe
 from .executor import Busy, active_trip, executor
 from .interpreter import InterpretError, get_interpreter
-from .models import Job, Photo, Trip
+from .models import Job, ObjectMemory, Photo, Trip
 from .robot import RobotError, get_robot
 
 FORWARD_CHOICES = [0.1, 0.25, 0.5, 1.0, 1.5, 2.0, 3.0]
@@ -159,6 +159,7 @@ def api_state(request):
             "recent_jobs": [_job_dict(j) for j in Job.objects.all()[:12]],
             "trip": trip_state,
             "latest_photo": latest.as_dict() if latest else None,
+            "memory": [m.as_dict() for m in ObjectMemory.objects.order_by("-last_seen")[:40]],
         }
     )
 

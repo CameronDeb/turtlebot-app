@@ -42,3 +42,14 @@
   search and verification runs now; fetching is an optional extension.
 - Before the final arm mount: check stability with the arm fully extended, load on the two mounting points, motor voltage.
 - Comparison with GS-LTS / DynaMem / DREAM / MIF: turtlebot-gs/paper/related_work_revisit.md.
+
+## Nov 22, 2026 (late): B1 object memory done (sim + deployed, not yet tried on the robot)
+- New `ObjectMemory` model + `control/memory.py`: every located detection ≥ 0.40 within 4 m becomes a sighting;
+  same label within 0.5 m merges (weighted average position, views, viewing directions per 20°, scores, times).
+- Positions are in the **slam map frame** (agent 1.8 `/status` adds `map_to_odom`), so they survive odom resets;
+  without a map they're stored as frame="odom".
+- Find remembers each look plus its final blended estimate (weight 2). Scan takes `objects` (≤ 8 labels, one
+  detector call each per picture), from the new "Scan also looks for" box or typed "scan for chair, backpack and plant".
+- Page: "Object memory" table; admin lists entries. 75 tests pass.
+- Agent 1.8 deployed to the robot Nov 22 (adopted the running slam); web app restarted with migration 0002.
+- Next: B2 verify command (go look at a remembered spot; confirmed / moved / missing; `last_checked`).

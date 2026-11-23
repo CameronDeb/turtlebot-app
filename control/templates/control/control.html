@@ -51,6 +51,9 @@
       <button class="btn cmd secondary" data-cmd="dock" type="button">Dock</button>
       <button class="btn cmd home" data-cmd="return_home" type="button" id="return-btn">⌂ Return to start / dock</button>
     </div>
+    <label class="wide-label">Scan also looks for (optional, comma-separated; what it sees is remembered)
+      <input id="scan-objects" type="text" maxlength="200" autocomplete="off" placeholder="e.g. chair, backpack, potted plant">
+    </label>
     <p class="hint" id="trip-info">No trip yet: the first move starts recording the path home.</p>
 
     <h2>Find an object</h2>
@@ -94,6 +97,14 @@
     <h2>Path this trip</h2>
     <svg id="map" viewBox="-1 -1 2 2" preserveAspectRatio="xMidYMid meet" aria-label="Path of the current trip"></svg>
     <p class="hint">Grey: path recorded since the start (the way home). Blue: robot. Square: start or dock.</p>
+  </section>
+
+  <section class="card memory-card">
+    <h2>Object memory</h2>
+    <table class="log"><thead><tr><th>Object</th><th>Where (map)</th><th>Last seen</th><th>Views</th><th>Status</th></tr></thead>
+      <tbody id="memory"><tr><td colspan="5" class="hint">Nothing remembered yet. Find something, or scan with a list of objects.</td></tr></tbody></table>
+    <p class="hint">Where the robot has seen things, kept between sessions. Positions are on the learned map, so
+      they stay right after the robot restarts. "views" counts sightings; the revisit policy will use these.</p>
   </section>
 
   <section class="card log-card">

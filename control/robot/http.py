@@ -58,6 +58,7 @@ class HttpRobotClient(RobotClient):
             "dock_visible": d.get("dock_visible"),
             "wheels_enabled": d.get("wheels_enabled"),
             "mapping": d.get("mapping"),
+            "map_to_odom": d.get("map_to_odom"),
             "busy": d.get("busy", False),
             "active": d.get("active"),
             "scan_age": d.get("scan_age"),

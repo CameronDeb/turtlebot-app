@@ -35,7 +35,10 @@
       case "left": return { kind: "turn", params: { degrees: angle } };
       case "right": return { kind: "turn", params: { degrees: -angle } };
       case "photo": return { kind: "photo", params: {} };
-      case "scan": return { kind: "scan", params: { steps: 8 } };
+      case "scan": {
+        const objects = $("scan-objects").value.split(",").map((t) => t.trim()).filter(Boolean);
+        return { kind: "scan", params: objects.length ? { steps: 8, objects } : { steps: 8 } };
+      }
       case "undock": return { kind: "undock", params: {} };
       case "dock": return { kind: "dock", params: {} };
       case "return_home": return { kind: "return_home", params: { check_clear: checkClear } };
@@ -104,6 +107,33 @@
     return iso ? new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit", timeZone: TB.timeZone }) : "";
   }
 
+  function renderMemory(items) {
+    const body = $("memory");
+    if (!items.length) return;
+    body.replaceChildren(...items.map((m) => {
+      const tr = document.createElement("tr");
+      const cells = [
+        m.label,
+        `${m.x.toFixed(2)}, ${m.y.toFixed(2)} m` + (m.frame === "odom" ? " (odom)" : ""),
+        new Date(m.last_seen).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZone: TB.timeZone }),
+        String(m.views),
+        m.status === "present" ? "seen there" : "not there",
+      ];
+      for (const c of cells) {
+        const td = document.createElement("td");
+        td.textContent = c;
+        tr.appendChild(td);
+      }
+      if (m.photo_url) {
+        const a = document.createElement("a");
+        a.href = m.photo_url;
+        a.textContent = m.label;
+        tr.firstChild.replaceChildren(a);
+      }
+      return tr;
+    }));
+  }
+
   function render(state) {
     const r = state.robot;
     const conn = $("conn");
@@ -126,6 +156,7 @@
     }
 
     $("estop").hidden = !(r.connected && r.wheels_enabled === false);
+    renderMemory(state.memory || []);
     const m = r.mapping;
     $("mapping").textContent = !r.connected ? "–" : !m ? "not available" : !m.enabled ? "off" : m.message;
     busy = !!state.job;

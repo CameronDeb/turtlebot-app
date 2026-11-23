@@ -14,7 +14,7 @@ from django.db import close_old_connections, connections, transaction
 from django.db.models import Max
 from django.utils import timezone
 
-from . import pathplan, planner, vision
+from . import memory, pathplan, planner, vision
 from .archive import save_photo
 from .commands import describe, validate
 from .detector import DetectorError, get_detector
@@ -197,7 +197,25 @@ class JobContext:
             raise RobotError(str(e)) from None
         located = [{**d, **vision.locate(d, data, range_at=self.robot.range_at)} for d in dets]
         photo = self.save(data, scan_index=scan_index, detections=located)
+        self.remember(query, located, data.pose, photo)
         return photo, data, located
+
+    def map_frame(self):
+        try:
+            return self.robot.map_to_odom()
+        except RobotError:
+            return None
+
+    def remember(self, label, located, pose, photo=None):
+        """Add what one picture showed to the object memory (never fails the command)."""
+        try:
+            found = memory.remember_detections(label, located, pose or self.robot.pose(), self.map_frame(), photo)
+        except Exception:  # noqa: BLE001 - the memory is a side record; a bad write must not stop the robot
+            logger.exception("object memory: couldn't record a sighting of %r", label)
+            return []
+        ids = self.result.setdefault("memory_ids", [])
+        ids.extend(e.id for e in found if e.id not in ids)
+        return found
 
 
 # ---------------------------------------------------------------- command handlers
@@ -239,11 +257,42 @@ def do_photo(ctx, p):
 def do_scan(ctx, p):
     steps = p["steps"]
     step_deg = 360.0 / steps
-    ids = []
+    labels = p.get("objects") or []
+    if labels:
+        _wait_for_sensors(ctx)
+    ids, seen = [], {}
     for i in range(steps):
-        ids.append(ctx.photo(scan_index=i).id)
+        if labels:
+            photo, dets = _look_many(ctx, labels, scan_index=i)
+            for d in dets:
+                seen[d["label"]] = seen.get(d["label"], 0) + 1
+        else:
+            photo = ctx.photo(scan_index=i)
+        ids.append(photo.id)
         ctx.rotate(step_deg)
-    return f"Scanned 360°: {len(ids)} photos (#{ids[0]}–#{ids[-1]})."
+    msg = f"Scanned 360°: {len(ids)} photos (#{ids[0]}–#{ids[-1]})."
+    if labels:
+        found = ", ".join(f"{k} ×{v}" if v > 1 else k for k, v in seen.items()) or "none of them"
+        n = len(ctx.result.get("memory_ids", []))
+        msg += f" Looked for {', '.join(labels)}: saw {found}; {n} remembered place{'s' if n != 1 else ''} updated."
+    return msg
+
+
+def _look_many(ctx, labels, scan_index=None):
+    """One picture, searched for several objects (one detector call each, ~0.2 s), all remembered."""
+    ctx.check()
+    data = ctx.robot.photo()
+    located = []
+    for label in labels:
+        try:
+            dets = get_detector().detect(data, label)
+        except DetectorError as e:
+            raise RobotError(str(e)) from None
+        located += [{**d, "label": label, **vision.locate(d, data, range_at=ctx.robot.range_at)} for d in dets]
+    photo = ctx.save(data, scan_index=scan_index, detections=located)
+    for label in labels:
+        ctx.remember(label, [d for d in located if d["label"] == label], data.pose, photo)
+    return photo, located
 
 
 def do_undock(ctx, p):
@@ -559,9 +608,15 @@ def do_find(ctx, p):
             travelled += _moved(r) or 0.0
         except RobotError:
             pass  # no room (the lidar sees the object itself): this is as close as it gets
-    ctx.photo()
+    last = ctx.photo()
     pose = ctx.robot.pose()
     gap = max(math.hypot(goal[0] - pose.x, goal[1] - pose.y) - BODY_FRONT, 0.0)
+    # the approach's blended estimate is the best position it has: remember it as a strong sighting
+    try:
+        memory.record_sighting(query, goal, target["score"], (pose.x, pose.y), ctx.map_frame(),
+                               distance=gap + BODY_FRONT, photo=last, weight=2.0)
+    except Exception:  # noqa: BLE001
+        logger.exception("object memory: couldn't record the end of a Find")
     how = "" if legs <= 1 else f" along a planned route ({legs} legs)"
     if boxed_in:
         return (

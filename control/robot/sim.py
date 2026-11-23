@@ -46,6 +46,9 @@ class SimRobotClient(RobotClient):
         # lidar watch stops the robot 0.25 m before one in its path, then it is an ordinary obstacle
         self.appearing = []
         self.remembered = []  # (x, y) obstacles in the learned map that the live scan can't see right now
+        # where the learned map's frame sits in odom (x, y, yaw), or None for "no map yet"; tests move it to check
+        # that object memory survives an odom reset
+        self.map_frame = (0.0, 0.0, 0.0)
         self._lock = threading.Lock()
         self._busy = threading.Lock()
         self._stop = threading.Event()
@@ -83,6 +86,7 @@ class SimRobotClient(RobotClient):
                 "active": None,
                 "scan_age": None if self.docked else 0.1,
                 "camera": {"rgbd_age": 0.1, "depth_age": 0.1, "stock_age": None},
+                "map_to_odom": None if self.map_frame is None else list(self.map_frame),
             }
 
     def motors_on(self):

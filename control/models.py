@@ -165,3 +165,55 @@ class Photo(models.Model):
             "has_depth": bool(self.depth),
             "detections": self.detections or [],
         }
+
+
+class ObjectMemory(models.Model):
+    """Where the robot last saw an object, kept between sessions (input to the revisit policy).
+
+    Positions are in the learned map's frame (frame="map"), which stays put when the base restarts and odom resets
+    to zero. Without a map they are kept in odom (frame="odom") and only hold until the next restart."""
+
+    PRESENT, MISSING = "present", "missing"
+    STATUS_CHOICES = [(PRESENT, "Seen there"), (MISSING, "Not there when checked")]
+
+    label = models.CharField(max_length=60, db_index=True)
+    x = models.FloatField()
+    y = models.FloatField()
+    frame = models.CharField(max_length=5, default="map")
+    status = models.CharField(max_length=8, choices=STATUS_CHOICES, default=PRESENT)
+    first_seen = models.DateTimeField()
+    last_seen = models.DateTimeField()
+    last_checked = models.DateTimeField(null=True, blank=True)  # last time the robot looked there (B2 verify)
+    views = models.PositiveIntegerField(default=0)  # sightings merged into this entry
+    weight = models.FloatField(default=0.0)  # sum of sighting weights (score x quality), for the running average
+    # directions the object has been seen from (deg, map frame, object -> robot), at most one per 20 deg
+    view_dirs = models.JSONField(default=list, blank=True)
+    best_score = models.FloatField(default=0.0)
+    last_score = models.FloatField(default=0.0)
+    last_distance = models.FloatField(null=True, blank=True)  # m from the robot at the last sighting
+    last_photo = models.ForeignKey(Photo, null=True, blank=True, on_delete=models.SET_NULL, related_name="+")
+
+    class Meta:
+        ordering = ["label", "-last_seen"]
+
+    def __str__(self):
+        return f"{self.label} at ({self.x:.2f}, {self.y:.2f}) {self.frame}"
+
+    def as_dict(self):
+        return {
+            "id": self.id,
+            "label": self.label,
+            "x": round(self.x, 3),
+            "y": round(self.y, 3),
+            "frame": self.frame,
+            "status": self.status,
+            "first_seen": self.first_seen.isoformat(),
+            "last_seen": self.last_seen.isoformat(),
+            "last_checked": self.last_checked.isoformat() if self.last_checked else None,
+            "views": self.views,
+            "view_dirs": self.view_dirs,
+            "best_score": round(self.best_score, 3),
+            "last_score": round(self.last_score, 3),
+            "last_distance": self.last_distance,
+            "photo_url": self.last_photo.get_absolute_url() if self.last_photo_id else None,
+        }

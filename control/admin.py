@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Job, Photo, Trip, Waypoint
+from .models import Job, ObjectMemory, Photo, Trip, Waypoint
 
 
 class WaypointInline(admin.TabularInline):
@@ -29,3 +29,9 @@ class PhotoAdmin(admin.ModelAdmin):
     list_filter = ["camera_topic"]
     search_fields = ["note"]
     readonly_fields = ["width", "height"]
+
+
+@admin.register(ObjectMemory)
+class ObjectMemoryAdmin(admin.ModelAdmin):
+    list_display = ["label", "x", "y", "frame", "status", "views", "best_score", "last_seen", "last_checked"]
+    list_filter = ["label", "status", "frame"]

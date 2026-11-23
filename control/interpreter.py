@@ -30,6 +30,7 @@ def get_interpreter():
 
 
 _NUM = r"(\d+(?:\.\d+)?)"
+_BIG_SPLIT = re.compile(r"\s*(?:;|\bthen\b|\.(?!\d))\s*", re.I)
 _SPLIT = re.compile(r"\s*(?:,|;|\bthen\b|\band\b|\.(?!\d))\s*", re.I)
 _UNITS = {
     "m": 1.0, "meter": 1.0, "meters": 1.0, "metre": 1.0, "metres": 1.0,
@@ -45,6 +46,7 @@ _TURN = re.compile(rf"^(?:turn|rotate|spin)\s+(left|right)(?:\s+(?:by\s+)?{_NUM}
 _TURN_NUM_FIRST = re.compile(rf"^(?:turn|rotate|spin)\s+{_NUM}\s*(?:°|deg|degrees?)?\s+(?:to\s+the\s+)?(left|right)$", re.I)
 _TURN_AROUND = re.compile(r"^(?:turn|spin)\s+around$", re.I)
 _PHOTO = re.compile(r"^(?:take\s+(?:a\s+)?)?(?:picture|photo|pic|snapshot|snap)(?:\s+of\s+.*)?$", re.I)
+_SCAN_FOR = re.compile(r"^(?:do\s+a\s+)?(?:scan|look\s+around)(?:\s+(?:the\s+)?(?:room|area))?\s+for\s+(.+)$", re.I)
 _SCAN = re.compile(r"^(?:do\s+a\s+)?(?:scan|look\s+around)(?:\s+(?:the\s+)?(?:room|area|around))?$", re.I)
 _RETURN = re.compile(
     r"^(?:return|go\s+back|come\s+back|go\s+home|head\s+home)(?:\s+(?:home|to\s+(?:the\s+)?(?:dock|start|base)))?$", re.I
@@ -89,6 +91,9 @@ class RuleBasedInterpreter(Interpreter):
             return "turn", {"degrees": 180.0}
         if _PHOTO.match(c):
             return "photo", {}
+        if m := _SCAN_FOR.match(c):
+            names = [n.strip() for n in re.split(r",|\band\b", m.group(1)) if n.strip()]
+            return "scan", {"objects": names}
         if _SCAN.match(c):
             return "scan", {}
         if _RETURN.match(c):
@@ -110,7 +115,14 @@ class RuleBasedInterpreter(Interpreter):
         raise InterpretError(f"I don't understand \"{clause.strip()}\"")
 
     def interpret(self, text):
-        clauses = [c for c in _SPLIT.split(text or "") if c and c.strip()]
+        clauses = []
+        # "scan for chair, backpack and plant" keeps its list together; everything else splits on , and then ;
+        for chunk in _BIG_SPLIT.split(text or ""):
+            if _SCAN_FOR.match(chunk.strip()):
+                clauses.append(chunk)
+            else:
+                clauses += [c for c in _SPLIT.split(chunk) if c and c.strip()]
+        clauses = [c for c in clauses if c and c.strip()]
         if not clauses:
             raise InterpretError("type a command, e.g. \"forward 50 cm, turn left 90, take a picture\"")
         if len(clauses) > MAX_SEQUENCE:

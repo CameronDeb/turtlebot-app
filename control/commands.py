@@ -7,6 +7,7 @@ MAX_FORWARD_M = 5.0  # obstacles shorten a move (the lidar watches while driving
 MIN_FORWARD_M = 0.05
 MAX_TURN_DEG = 360.0
 MAX_SEQUENCE = 20
+MAX_SCAN_OBJECTS = 8  # one detector call per object per picture (~0.2 s each)
 FIND_STANDOFF_M = (0.10, 1.0, 0.30)  # min, max, default gap left between the bumper and the object
 FIND_MAX_RANGE_M = (0.5, 50.0, 25.0)  # backstop on total driving; the real stop is "no progress" (executor)
 
@@ -65,7 +66,25 @@ def validate(kind, params=None, _nested=False):
         steps = _number(params, "steps", 4, 12, default=8)
         if int(steps) != steps:
             raise CommandError("'steps' must be a whole number")
-        return {"steps": int(steps)}
+        out = {"steps": int(steps)}
+        objs = params.get("objects")
+        if objs:
+            from .detector import clean_query
+
+            if isinstance(objs, str):
+                objs = objs.split(",")
+            if not isinstance(objs, list) or not all(isinstance(o, str) for o in objs):
+                raise CommandError("'objects' must be a list of names, e.g. [\"chair\", \"backpack\"]")
+            labels = []
+            for o in objs:
+                o = clean_query(o)
+                if o and o not in labels:
+                    labels.append(o)
+            if len(labels) > MAX_SCAN_OBJECTS:
+                raise CommandError(f"look for at most {MAX_SCAN_OBJECTS} objects in one scan")
+            if labels:
+                out["objects"] = labels
+        return out
     if kind == "find":
         obj = params.get("object")
         if not isinstance(obj, str):
@@ -113,7 +132,8 @@ def describe(kind, params):
         d = params["degrees"]
         return f"Turn {'left' if d > 0 else 'right'} {abs(d):g}°"
     if kind == "scan":
-        return f"Scan 360° ({params['steps']} pictures)"
+        objs = params.get("objects")
+        return f"Scan 360° ({params['steps']} pictures)" + (f", looking for {', '.join(objs)}" if objs else "")
     if kind == "find":
         return f"Find \"{params['object']}\"" + (" and go to it" if params.get("approach", True) else "")
     if kind == "sequence":
