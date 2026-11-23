@@ -15,3 +15,4 @@ or found out. No passwords or tokens in here (this repo is on GitHub).
 
 Related, outside this repo (lab PC `C:\Users\uoavs\turtlebot-gs\notes\`): `HANDOFF.md` (contains passwords: never copy
 into this repo), `session_log.md`, `robot_config.md`, `object_goal_nav_plan.md`, `ideas_dynamic_and_arm.md`.
+- [plan_router_and_verification.md](plan_router_and_verification.md): travel router setup + search/verification run plan (Nov 22)
