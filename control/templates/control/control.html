@@ -66,8 +66,9 @@
         </select> in front
       </label>
     </div>
-    <p class="hint">Looks all the way round, then turns to the best match and drives up to it in steps, checking
-      again after each one. Obstacles in the way stop it; it doesn't plan a way round them yet.</p>
+    <p class="hint">Looks all the way round, then plans a route around obstacles (live lidar + the map it has
+      learned) and drives up to it in steps, looking again after each one. It stops if it gets stuck or something
+      steps in front, and remembers places it got stuck.</p>
 
     <h2>Type a command</h2>
     <form id="text-form" class="text-form">
